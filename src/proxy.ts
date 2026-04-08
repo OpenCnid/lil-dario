@@ -61,16 +61,20 @@ const MODEL_ALIASES: Record<string, string> = {
 
 // OpenAI model name → Anthropic model name
 const OPENAI_MODEL_MAP: Record<string, string> = {
-  'gpt-4': 'claude-opus-4-6',
+  'gpt-4.1': 'claude-opus-4-6',
+  'gpt-4.1-mini': 'claude-sonnet-4-6',
+  'gpt-4.1-nano': 'claude-haiku-4-5',
   'gpt-4o': 'claude-opus-4-6',
-  'gpt-4-turbo': 'claude-opus-4-6',
   'gpt-4o-mini': 'claude-haiku-4-5',
+  'gpt-4-turbo': 'claude-opus-4-6',
+  'gpt-4': 'claude-opus-4-6',
   'gpt-3.5-turbo': 'claude-haiku-4-5',
-  'o1': 'claude-opus-4-6',
-  'o1-mini': 'claude-sonnet-4-6',
-  'o1-preview': 'claude-opus-4-6',
   'o3': 'claude-opus-4-6',
   'o3-mini': 'claude-sonnet-4-6',
+  'o4-mini': 'claude-sonnet-4-6',
+  'o1': 'claude-opus-4-6',
+  'o1-mini': 'claude-sonnet-4-6',
+  'o1-pro': 'claude-opus-4-6',
 };
 
 /**

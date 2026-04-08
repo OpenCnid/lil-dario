@@ -181,9 +181,9 @@ Model mapping (automatic):
 
 | OpenAI model | Maps to |
 |---|---|
-| `gpt-4`, `gpt-4o`, `o1`, `o3` | `claude-opus-4-6` |
-| `o1-mini`, `o3-mini` | `claude-sonnet-4-6` |
-| `gpt-3.5-turbo`, `gpt-4o-mini` | `claude-haiku-4-5` |
+| `gpt-4.1`, `gpt-4o`, `o3`, `o1`, `o1-pro` | `claude-opus-4-6` |
+| `gpt-4.1-mini`, `o3-mini`, `o4-mini`, `o1-mini` | `claude-sonnet-4-6` |
+| `gpt-4.1-nano`, `gpt-4o-mini`, `gpt-3.5-turbo` | `claude-haiku-4-5` |
 | Any `claude-*` model | Passed through directly |
 
 Streaming, system prompts, temperature, and stop sequences all translate automatically.
