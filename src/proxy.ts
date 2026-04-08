@@ -14,6 +14,7 @@ import { getAccessToken, getStatus } from './oauth.js';
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const DEFAULT_PORT = 3456;
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — generous for large prompts, prevents abuse
+const UPSTREAM_TIMEOUT_MS = 300_000; // 5 min — matches Anthropic SDK default
 const LOCALHOST = '127.0.0.1';
 const CORS_ORIGIN = 'http://localhost';
 
@@ -146,6 +147,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         method: req.method ?? 'POST',
         headers,
         body: body.length > 0 ? body : undefined,
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
         // @ts-expect-error — duplex needed for streaming
         duplex: 'half',
       });
@@ -209,7 +211,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   server.listen(port, LOCALHOST, () => {
     const oauthLine = `OAuth: ${status.status} (expires in ${status.expiresIn})`;
     console.log('');
-    console.log(`  dario v1.0.0 — http://localhost:${port}`);
+    console.log(`  dario — http://localhost:${port}`);
     console.log('');
     console.log('  Your Claude subscription is now an API.');
     console.log('');
@@ -222,7 +224,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   });
 
   // Periodic token refresh (every 15 minutes)
-  setInterval(async () => {
+  const refreshInterval = setInterval(async () => {
     try {
       const s = await getStatus();
       if (s.status === 'expiring') {
@@ -233,4 +235,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       console.error('[dario] Background refresh error:', err instanceof Error ? err.message : err);
     }
   }, 15 * 60 * 1000);
+
+  // Graceful shutdown
+  const shutdown = () => {
+    console.log('\n[dario] Shutting down...');
+    clearInterval(refreshInterval);
+    server.close(() => process.exit(0));
+    // Force exit after 5s if connections don't close
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }

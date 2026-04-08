@@ -131,6 +131,10 @@ async function logout() {
 async function proxy() {
   const portArg = args.find(a => a.startsWith('--port='));
   const port = portArg ? parseInt(portArg.split('=')[1]!) : 3456;
+  if (isNaN(port) || port < 1 || port > 65535) {
+    console.error('[dario] Invalid port. Must be 1-65535.');
+    process.exit(1);
+  }
   const verbose = args.includes('--verbose') || args.includes('-v');
 
   await startProxy({ port, verbose });
@@ -193,6 +197,7 @@ if (!handler) {
 }
 
 handler().catch(err => {
-  console.error('Fatal error:', err);
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error('Fatal error:', msg.replace(/sk-ant-[a-zA-Z0-9_-]+/g, '[REDACTED]'));
   process.exit(1);
 });

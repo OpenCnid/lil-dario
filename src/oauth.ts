@@ -19,6 +19,14 @@ const OAUTH_REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback';
 // Refresh 30 min before expiry
 const REFRESH_BUFFER_MS = 30 * 60 * 1000;
 
+// In-memory credential cache — avoids disk reads on every request
+let credentialsCache: CredentialsFile | null = null;
+let credentialsCacheTime = 0;
+const CACHE_TTL_MS = 10_000; // Re-read from disk every 10s at most
+
+// Mutex to prevent concurrent refresh races
+let refreshInProgress: Promise<OAuthTokens> | null = null;
+
 export interface OAuthTokens {
   accessToken: string;
   refreshToken: string;
@@ -45,9 +53,20 @@ function getCredentialsPath(): string {
 }
 
 export async function loadCredentials(): Promise<CredentialsFile | null> {
+  // Return cached if fresh
+  if (credentialsCache && Date.now() - credentialsCacheTime < CACHE_TTL_MS) {
+    return credentialsCache;
+  }
   try {
     const raw = await readFile(getCredentialsPath(), 'utf-8');
-    return JSON.parse(raw) as CredentialsFile;
+    const parsed = JSON.parse(raw);
+    // Validate structure
+    if (!parsed?.claudeAiOauth?.accessToken || !parsed?.claudeAiOauth?.refreshToken) {
+      return null;
+    }
+    credentialsCache = parsed as CredentialsFile;
+    credentialsCacheTime = Date.now();
+    return credentialsCache;
   } catch {
     return null;
   }
@@ -63,6 +82,9 @@ async function saveCredentials(creds: CredentialsFile): Promise<void> {
   await rename(tmpPath, path);
   // Set permissions (best-effort — no-op on Windows where mode is ignored)
   try { await chmod(path, 0o600); } catch { /* Windows ignores file modes */ }
+  // Invalidate cache so next read picks up the new tokens
+  credentialsCache = creds;
+  credentialsCacheTime = Date.now();
 }
 
 /**
@@ -132,8 +154,20 @@ export async function exchangeCode(code: string, codeVerifier: string): Promise<
 /**
  * Refresh the access token using the refresh token.
  * Retries with exponential backoff on transient failures.
+ * Uses a mutex to prevent concurrent refresh races.
  */
 export async function refreshTokens(): Promise<OAuthTokens> {
+  // Prevent concurrent refreshes — if one is already in progress, wait for it
+  if (refreshInProgress) return refreshInProgress;
+  refreshInProgress = doRefreshTokens();
+  try {
+    return await refreshInProgress;
+  } finally {
+    refreshInProgress = null;
+  }
+}
+
+async function doRefreshTokens(): Promise<OAuthTokens> {
   const creds = await loadCredentials();
   if (!creds?.claudeAiOauth?.refreshToken) {
     throw new Error('No refresh token available. Run `dario login` first.');
