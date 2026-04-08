@@ -33,7 +33,7 @@ That's it. Any tool that speaks the Anthropic API now uses your subscription.
 
 You pay $100-200/mo for Claude Max or Pro. But that subscription only works on claude.ai and Claude Code. If you want to use Claude with **any other tool** — OpenClaw, Cursor, Continue, Aider, your own scripts — you need a separate API key with separate billing.
 
-**Note:** Claude subscriptions have undocumented weekly usage limits. When exceeded, Opus and Sonnet may return 429 errors while Haiku continues working. Use `--cli` mode to route through Claude Code's binary, which is not affected by these limits.
+**Note:** Claude subscriptions have [usage limits](https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work) that reset on rolling 5-hour and 7-day windows. When exceeded, Opus and Sonnet may return 429 errors while Haiku continues working. Use `--cli` mode to route through Claude Code's binary, which is not affected by these limits.
 
 **dario fixes this.** It creates a local proxy that translates API key auth into your subscription's OAuth tokens — and with `--cli` mode, routes through the Claude Code binary for uninterrupted access.
 
@@ -95,7 +95,7 @@ python my_script.py
 
 ## CLI Backend
 
-If you're getting rate limited on Opus or Sonnet, use `--cli` mode. This routes requests through the Claude Code binary instead of hitting the API directly — and Claude Code has priority routing that bypasses subscription rate limits.
+If you're getting rate limited on Opus or Sonnet, use `--cli` mode. This routes requests through the Claude Code binary instead of hitting the API directly. Claude Code has priority routing that continues working even when direct API calls return 429.
 
 ```bash
 dario proxy --cli                    # Opus works even when rate limited
@@ -124,8 +124,8 @@ Model: claude-opus-4-6 (all requests)
 | Streaming | Yes | No (full response) |
 | Tool use passthrough | Yes | No |
 | Latency | Low | Higher (process spawn) |
-| Rate limits | Subject to weekly quota | Bypassed |
-| Opus when throttled | Blocked | **Works** |
+| Rate limits | Subject to 5h/7d quotas | Not affected |
+| Opus when throttled | May return 429 | **Works** |
 
 ## Model Selection
 
@@ -290,7 +290,7 @@ ANTHROPIC_BASE_URL=http://localhost:3456 ANTHROPIC_API_KEY=dario your-tool-here
 - All Claude models — including Opus when rate limited
 - Non-streaming responses
 - System prompts and multi-turn conversations (via context injection)
-- Bypasses subscription rate limits
+- Not affected by API rate limits
 
 ## Endpoints
 
@@ -343,7 +343,10 @@ Should work if your plan includes Claude Code access. Not tested yet — please 
 Dario auto-refreshes tokens 30 minutes before expiry. You should never see an auth error in normal use. If something goes wrong, `dario refresh` forces an immediate refresh, or `dario login` to re-authenticate.
 
 **I'm getting rate limited on Opus. What do I do?**
-Use `--cli` mode: `dario proxy --cli`. This routes through the Claude Code binary, which has priority access that bypasses subscription rate limits.
+Use `--cli` mode: `dario proxy --cli`. This routes through the Claude Code binary, which continues working when direct API calls are rate limited. You can also enable [extra usage](https://support.claude.com/en/articles/12429409-manage-extra-usage-for-paid-claude-plans) in your Anthropic account settings to extend your limits at API rates.
+
+**What are the usage limits?**
+Claude subscriptions have rolling 5-hour and 7-day usage windows shared across claude.ai and Claude Code. See [Anthropic's docs](https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work) for details. Check your current status with `echo "hi" | ANTHROPIC_LOG=debug claude --print --model claude-haiku-4-5 2>&1 | grep ratelimit`.
 
 **Can I run this on a server?**
 Dario binds to localhost by default. For server use, you'd need to handle the initial browser-based login on a machine with a browser, then copy `~/.dario/credentials.json` to your server. Auto-refresh will keep it alive from there.
