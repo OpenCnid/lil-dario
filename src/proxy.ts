@@ -14,7 +14,6 @@ import { getAccessToken, getStatus } from './oauth.js';
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const DEFAULT_PORT = 3456;
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — generous for large prompts, prevents abuse
-const ALLOWED_PATH_PREFIX = '/v1/'; // Only proxy Anthropic API paths
 const LOCALHOST = '127.0.0.1';
 const CORS_ORIGIN = 'http://localhost';
 
@@ -77,15 +76,21 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       return;
     }
 
-    // Only allow proxying to /v1/* paths — block path traversal and SSRF
-    const urlPath = req.url?.split('?')[0] ?? '';
-    if (!urlPath.startsWith(ALLOWED_PATH_PREFIX) || urlPath.includes('..') || urlPath.includes('//')) {
+    // Allowlisted API paths — only these are proxied (prevents SSRF)
+    const rawPath = req.url?.split('?')[0] ?? '';
+    const allowedPaths: Record<string, string> = {
+      '/v1/messages': `${ANTHROPIC_API}/v1/messages`,
+      '/v1/models': `${ANTHROPIC_API}/v1/models`,
+      '/v1/complete': `${ANTHROPIC_API}/v1/complete`,
+    };
+    const targetBase = allowedPaths[rawPath];
+    if (!targetBase) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Forbidden', message: `Only ${ALLOWED_PATH_PREFIX}* paths are proxied` }));
+      res.end(JSON.stringify({ error: 'Forbidden', message: 'Path not allowed' }));
       return;
     }
 
-    // Only allow POST (Messages API) and GET (models, etc)
+    // Only allow POST (Messages API) and GET (models)
     if (req.method !== 'POST' && req.method !== 'GET') {
       res.writeHead(405, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Method not allowed' }));
@@ -116,17 +121,8 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         console.log(`[dario] #${requestCount} ${req.method} ${req.url}`);
       }
 
-      // Forward to Anthropic — construct URL safely to prevent SSRF
-      const targetUrl = new URL(urlPath, ANTHROPIC_API);
-      // Preserve query string from original request
-      const queryString = req.url?.includes('?') ? req.url.split('?')[1] : '';
-      if (queryString) targetUrl.search = queryString;
-      // Verify the constructed URL still points to Anthropic (defense in depth)
-      if (targetUrl.origin !== ANTHROPIC_API) {
-        res.writeHead(403, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Forbidden' }));
-        return;
-      }
+      // Build target URL from allowlist (no user input in URL construction)
+      const targetUrl = targetBase;
 
       // Merge any client-provided beta flags with the required oauth flag
       const clientBeta = req.headers['anthropic-beta'] as string | undefined;
@@ -146,7 +142,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         'x-app': 'cli',
       };
 
-      const upstream = await fetch(targetUrl.toString(), {
+      const upstream = await fetch(targetUrl, {
         method: req.method ?? 'POST',
         headers,
         body: body.length > 0 ? body : undefined,
