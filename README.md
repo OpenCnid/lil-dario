@@ -159,34 +159,18 @@ dario proxy --cli --model=opus
 
 ## OpenAI Compatibility
 
-Dario speaks both Anthropic and OpenAI API formats. Any tool built for OpenAI works with your Claude subscription — Cursor, Continue, LiteLLM, anything.
+Dario implements `/v1/chat/completions` — any tool built for the OpenAI API works with your Claude subscription. No code changes needed.
 
 ```bash
-# Use with any OpenAI SDK or tool
+dario proxy --model=opus
+
 export OPENAI_BASE_URL=http://localhost:3456/v1
 export OPENAI_API_KEY=dario
+
+# Cursor, Continue, LiteLLM, any OpenAI SDK — all work
 ```
 
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://localhost:3456/v1", api_key="dario")
-response = client.chat.completions.create(
-    model="claude-opus-4-6",  # or use "gpt-4" — auto-maps to Opus
-    messages=[{"role": "user", "content": "Hello!"}]
-)
-```
-
-Model mapping (automatic):
-
-| OpenAI model | Maps to |
-|---|---|
-| `gpt-4.1`, `gpt-4o`, `o3`, `o1`, `o1-pro` | `claude-opus-4-6` |
-| `gpt-4.1-mini`, `o3-mini`, `o4-mini`, `o1-mini` | `claude-sonnet-4-6` |
-| `gpt-4.1-nano`, `gpt-4o-mini`, `gpt-3.5-turbo` | `claude-haiku-4-5` |
-| Any `claude-*` model | Passed through directly |
-
-Streaming, system prompts, temperature, and stop sequences all translate automatically.
+Use `--model=opus` to force the model regardless of what the client sends. Or pass `claude-opus-4-6` as the model name directly — Claude model names work as-is.
 
 ## Usage Examples
 
