@@ -14,7 +14,7 @@ import { homedir } from 'node:os';
 const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const OAUTH_AUTHORIZE_URL = 'https://platform.claude.com/oauth/authorize';
 const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
-const OAUTH_REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback';
+const OAUTH_SCOPES = 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload';
 
 // Refresh 30 min before expiry
 const REFRESH_BUFFER_MS = 30 * 60 * 1000;
@@ -92,32 +92,6 @@ async function saveCredentials(creds: CredentialsFile): Promise<void> {
 }
 
 /**
- * Start the OAuth flow (manual fallback). Returns the authorization URL and PKCE state
- * needed for the exchange step.
- */
-export function startOAuthFlow(): { authUrl: string; state: string; codeVerifier: string } {
-  const { codeVerifier, codeChallenge } = generatePKCE();
-  const state = base64url(randomBytes(16));
-
-  const params = new URLSearchParams({
-    code: 'true',
-    client_id: OAUTH_CLIENT_ID,
-    response_type: 'code',
-    redirect_uri: OAUTH_REDIRECT_URI,
-    scope: 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload',
-    code_challenge: codeChallenge,
-    code_challenge_method: 'S256',
-    state,
-  });
-
-  return {
-    authUrl: `${OAUTH_AUTHORIZE_URL}?${params.toString()}`,
-    state,
-    codeVerifier,
-  };
-}
-
-/**
  * Automatic OAuth flow using a local callback server (same as Claude Code).
  * Opens browser, captures the authorization code automatically.
  */
@@ -175,7 +149,7 @@ export async function startAutoOAuthFlow(): Promise<OAuthTokens> {
         client_id: OAUTH_CLIENT_ID,
         response_type: 'code',
         redirect_uri: `http://localhost:${port}/callback`,
-        scope: 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload',
+        scope: OAUTH_SCOPES,
         code_challenge: codeChallenge,
         code_challenge_method: 'S256',
         state,
@@ -228,45 +202,6 @@ async function exchangeCodeWithRedirect(code: string, codeVerifier: string, stat
 
   if (!res.ok) {
     throw new Error(`Token exchange failed (${res.status}). Try again with \`dario login\`.`);
-  }
-
-  const data = await res.json() as {
-    access_token: string;
-    refresh_token: string;
-    expires_in: number;
-    scope?: string;
-  };
-
-  const tokens: OAuthTokens = {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token,
-    expiresAt: Date.now() + data.expires_in * 1000,
-    scopes: data.scope?.split(' ') || ['user:inference'],
-  };
-
-  await saveCredentials({ claudeAiOauth: tokens });
-  return tokens;
-}
-
-/**
- * Exchange authorization code for tokens and save them.
- */
-export async function exchangeCode(code: string, codeVerifier: string): Promise<OAuthTokens> {
-  const res = await fetch(OAUTH_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'authorization_code',
-      client_id: OAUTH_CLIENT_ID,
-      code,
-      redirect_uri: OAUTH_REDIRECT_URI,
-      code_verifier: codeVerifier,
-    }),
-    signal: AbortSignal.timeout(30000),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Token exchange failed (${res.status}). Check your authorization code and try again.`);
   }
 
   const data = await res.json() as {

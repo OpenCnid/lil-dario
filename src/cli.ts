@@ -13,7 +13,7 @@
 import { readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { startOAuthFlow, startAutoOAuthFlow, exchangeCode, getStatus, refreshTokens } from './oauth.js';
+import { startAutoOAuthFlow, getStatus, refreshTokens } from './oauth.js';
 import { startProxy } from './proxy.js';
 
 const args = process.argv.slice(2);

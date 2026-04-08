@@ -1,6 +1,6 @@
 # Contributing to dario
 
-PRs welcome. The codebase is ~1100 lines across 4 files.
+PRs welcome. The codebase is ~1000 lines across 4 files.
 
 ## Setup
 

@@ -395,7 +395,7 @@ Dario handles your OAuth tokens. Here's why you can trust it:
 
 | Signal | Status |
 |--------|--------|
-| **Source code** | ~1100 lines of TypeScript — small enough to read in one sitting |
+| **Source code** | ~1000 lines of TypeScript — small enough to read in one sitting |
 | **Dependencies** | 1 production dep (`@anthropic-ai/sdk`). Verify: `npm ls --production` |
 | **npm provenance** | Every release is [SLSA attested](https://www.npmjs.com/package/@askalf/dario) via GitHub Actions |
 | **Security scanning** | [CodeQL](https://github.com/askalf/dario/actions/workflows/codeql.yml) runs on every push and weekly |
@@ -417,7 +417,7 @@ cd $(npm root -g)/@askalf/dario && npm ls --production
 
 ## Contributing
 
-PRs welcome. The codebase is ~1100 lines of TypeScript across 4 files:
+PRs welcome. The codebase is ~1000 lines of TypeScript across 4 files:
 
 | File | Purpose |
 |------|---------|
