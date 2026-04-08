@@ -59,6 +59,135 @@ const MODEL_ALIASES: Record<string, string> = {
   'haiku': 'claude-haiku-4-5',
 };
 
+// OpenAI model name → Anthropic model name
+const OPENAI_MODEL_MAP: Record<string, string> = {
+  'gpt-4': 'claude-opus-4-6',
+  'gpt-4o': 'claude-opus-4-6',
+  'gpt-4-turbo': 'claude-opus-4-6',
+  'gpt-4o-mini': 'claude-haiku-4-5',
+  'gpt-3.5-turbo': 'claude-haiku-4-5',
+  'o1': 'claude-opus-4-6',
+  'o1-mini': 'claude-sonnet-4-6',
+  'o1-preview': 'claude-opus-4-6',
+  'o3': 'claude-opus-4-6',
+  'o3-mini': 'claude-sonnet-4-6',
+};
+
+/**
+ * Translate OpenAI chat completion request → Anthropic Messages request.
+ */
+function openaiToAnthropic(body: Record<string, unknown>, modelOverride: string | null): Record<string, unknown> {
+  const messages = body.messages as Array<{ role: string; content: unknown }> | undefined;
+  if (!messages) return body;
+
+  // Extract system messages
+  const systemMessages = messages.filter(m => m.role === 'system');
+  const nonSystemMessages = messages.filter(m => m.role !== 'system');
+
+  // Map model name
+  const requestModel = String(body.model || '');
+  const model = modelOverride || OPENAI_MODEL_MAP[requestModel] || requestModel;
+
+  const result: Record<string, unknown> = {
+    model,
+    messages: nonSystemMessages.map(m => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.content,
+    })),
+    max_tokens: body.max_tokens ?? body.max_completion_tokens ?? 8192,
+  };
+
+  if (systemMessages.length > 0) {
+    result.system = systemMessages.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n');
+  }
+
+  if (body.stream) result.stream = true;
+  if (body.temperature != null) result.temperature = body.temperature;
+  if (body.top_p != null) result.top_p = body.top_p;
+  if (body.stop) result.stop_sequences = Array.isArray(body.stop) ? body.stop : [body.stop];
+
+  return result;
+}
+
+/**
+ * Translate Anthropic Messages response → OpenAI chat completion response.
+ */
+function anthropicToOpenai(body: Record<string, unknown>): Record<string, unknown> {
+  const content = body.content as Array<{ type: string; text?: string }> | undefined;
+  const text = content?.find(c => c.type === 'text')?.text ?? '';
+  const usage = body.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+
+  return {
+    id: `chatcmpl-${(body.id as string || '').replace('msg_', '')}`,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model: body.model,
+    choices: [{
+      index: 0,
+      message: { role: 'assistant', content: text },
+      finish_reason: body.stop_reason === 'end_turn' ? 'stop' : body.stop_reason === 'max_tokens' ? 'length' : 'stop',
+    }],
+    usage: {
+      prompt_tokens: usage?.input_tokens ?? 0,
+      completion_tokens: usage?.output_tokens ?? 0,
+      total_tokens: (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0),
+    },
+  };
+}
+
+/**
+ * Translate Anthropic SSE stream → OpenAI SSE stream.
+ */
+function translateStreamChunk(line: string): string | null {
+  if (!line.startsWith('data: ')) return null;
+  const json = line.slice(6).trim();
+  if (json === '[DONE]') return 'data: [DONE]\n\n';
+
+  try {
+    const event = JSON.parse(json) as Record<string, unknown>;
+
+    if (event.type === 'content_block_delta') {
+      const delta = event.delta as { type: string; text?: string } | undefined;
+      if (delta?.type === 'text_delta' && delta.text) {
+        return `data: ${JSON.stringify({
+          id: 'chatcmpl-dario',
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: 'claude',
+          choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
+        })}\n\n`;
+      }
+    }
+
+    if (event.type === 'message_stop') {
+      return `data: ${JSON.stringify({
+        id: 'chatcmpl-dario',
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: 'claude',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      })}\n\ndata: [DONE]\n\n`;
+    }
+  } catch { /* skip unparseable */ }
+  return null;
+}
+
+/**
+ * OpenAI-compatible models list.
+ */
+function openaiModelsList(): Record<string, unknown> {
+  const models = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'];
+  return {
+    object: 'list',
+    data: models.map(id => ({
+      id,
+      object: 'model',
+      created: 1700000000,
+      owned_by: 'anthropic',
+    })),
+  };
+}
+
 interface ProxyOptions {
   port?: number;
   verbose?: boolean;
@@ -237,21 +366,31 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       return;
     }
 
+    // OpenAI-compatible models list
+    if (urlPath === '/v1/models' && req.method === 'GET') {
+      requestCount++;
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': CORS_ORIGIN });
+      res.end(JSON.stringify(openaiModelsList()));
+      return;
+    }
+
+    // Detect OpenAI-format requests
+    const isOpenAI = urlPath === '/v1/chat/completions';
+
     // Allowlisted API paths — only these are proxied (prevents SSRF)
     const allowedPaths: Record<string, string> = {
       '/v1/messages': `${ANTHROPIC_API}/v1/messages`,
-      '/v1/models': `${ANTHROPIC_API}/v1/models`,
       '/v1/complete': `${ANTHROPIC_API}/v1/complete`,
     };
-    const targetBase = allowedPaths[urlPath];
+    const targetBase = isOpenAI ? `${ANTHROPIC_API}/v1/messages` : allowedPaths[urlPath];
     if (!targetBase) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Forbidden', message: 'Path not allowed' }));
       return;
     }
 
-    // Only allow POST (Messages API) and GET (models)
-    if (req.method !== 'POST' && req.method !== 'GET') {
+    // Only allow POST (Messages/Chat API) and GET (models)
+    if (req.method !== 'POST') {
       res.writeHead(405, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Method not allowed' }));
       return;
@@ -288,9 +427,16 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         return;
       }
 
-      // Override model in request body if --model flag was set
+      // Translate OpenAI → Anthropic format if needed
       let finalBody: Buffer | undefined = body.length > 0 ? body : undefined;
-      if (modelOverride && body.length > 0) {
+      if (isOpenAI && body.length > 0) {
+        try {
+          const parsed = JSON.parse(body.toString()) as Record<string, unknown>;
+          const translated = openaiToAnthropic(parsed, modelOverride);
+          finalBody = Buffer.from(JSON.stringify(translated));
+        } catch { /* not JSON, send as-is */ }
+      } else if (modelOverride && body.length > 0) {
+        // Override model in request body if --model flag was set
         try {
           const parsed = JSON.parse(body.toString()) as Record<string, unknown>;
           parsed.model = modelOverride;
@@ -374,11 +520,29 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       if (isStream && upstream.body) {
         // Stream SSE chunks through
         const reader = upstream.body.getReader();
+        const decoder = new TextDecoder();
         try {
+          let buffer = '';
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            res.write(value);
+            if (isOpenAI) {
+              // Translate Anthropic SSE → OpenAI SSE
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() ?? '';
+              for (const line of lines) {
+                const translated = translateStreamChunk(line);
+                if (translated) res.write(translated);
+              }
+            } else {
+              res.write(value);
+            }
+          }
+          // Flush remaining buffer
+          if (isOpenAI && buffer.trim()) {
+            const translated = translateStreamChunk(buffer);
+            if (translated) res.write(translated);
           }
         } catch (err) {
           if (verbose) console.error('[dario] Stream error:', sanitizeError(err));
@@ -387,7 +551,18 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       } else {
         // Buffer and forward
         const responseBody = await upstream.text();
-        res.end(responseBody);
+
+        if (isOpenAI && upstream.status >= 200 && upstream.status < 300) {
+          // Translate Anthropic response → OpenAI format
+          try {
+            const parsed = JSON.parse(responseBody) as Record<string, unknown>;
+            res.end(JSON.stringify(anthropicToOpenai(parsed)));
+          } catch {
+            res.end(responseBody);
+          }
+        } else {
+          res.end(responseBody);
+        }
 
         // Quick token estimate for logging
         if (verbose && responseBody) {

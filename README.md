@@ -16,9 +16,9 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> &bull;
-  <a href="#how-it-works">How It Works</a> &bull;
-  <a href="#usage-examples">Examples</a> &bull;
+  <a href="#openai-compatibility">OpenAI Compat</a> &bull;
   <a href="#cli-backend">CLI Backend</a> &bull;
+  <a href="#usage-examples">Examples</a> &bull;
   <a href="#faq">FAQ</a>
 </p>
 
@@ -157,6 +157,37 @@ Combine with `--cli` for rate-limit-proof Opus:
 dario proxy --cli --model=opus
 ```
 
+## OpenAI Compatibility
+
+Dario speaks both Anthropic and OpenAI API formats. Any tool built for OpenAI works with your Claude subscription — Cursor, Continue, LiteLLM, anything.
+
+```bash
+# Use with any OpenAI SDK or tool
+export OPENAI_BASE_URL=http://localhost:3456/v1
+export OPENAI_API_KEY=dario
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:3456/v1", api_key="dario")
+response = client.chat.completions.create(
+    model="claude-opus-4-6",  # or use "gpt-4" — auto-maps to Opus
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+
+Model mapping (automatic):
+
+| OpenAI model | Maps to |
+|---|---|
+| `gpt-4`, `gpt-4o`, `o1`, `o3` | `claude-opus-4-6` |
+| `o1-mini`, `o3-mini` | `claude-sonnet-4-6` |
+| `gpt-3.5-turbo`, `gpt-4o-mini` | `claude-haiku-4-5` |
+| Any `claude-*` model | Passed through directly |
+
+Streaming, system prompts, temperature, and stop sequences all translate automatically.
+
 ## Usage Examples
 
 ### curl
@@ -290,7 +321,8 @@ ANTHROPIC_BASE_URL=http://localhost:3456 ANTHROPIC_API_KEY=dario your-tool-here
 
 ### Direct API Mode
 - All Claude models (Opus 4.6, Sonnet 4.6, Haiku 4.5)
-- Streaming and non-streaming
+- **OpenAI-compatible** (`/v1/chat/completions`) — works with any OpenAI SDK or tool
+- Streaming and non-streaming (both Anthropic and OpenAI SSE formats)
 - Tool use / function calling
 - System prompts and multi-turn conversations
 - Prompt caching and extended thinking
@@ -307,7 +339,9 @@ ANTHROPIC_BASE_URL=http://localhost:3456 ANTHROPIC_API_KEY=dario your-tool-here
 
 | Path | Description |
 |------|-------------|
-| `POST /v1/messages` | Anthropic Messages API (main endpoint) |
+| `POST /v1/messages` | Anthropic Messages API |
+| `POST /v1/chat/completions` | OpenAI-compatible Chat API |
+| `GET /v1/models` | Model list (works with both SDKs) |
 | `GET /health` | Proxy health + OAuth status + request count |
 | `GET /status` | Detailed OAuth token status |
 

@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-04-08
+
+### Added
+- **OpenAI API compatibility** — `POST /v1/chat/completions` endpoint
+- Automatic model mapping (gpt-4 → opus, gpt-3.5-turbo → haiku, etc.)
+- OpenAI SSE streaming format translation
+- OpenAI-compatible `/v1/models` endpoint
+- Works with any OpenAI SDK, Cursor, Continue, LiteLLM, and more
+
 ## [1.2.1] - 2026-04-08
 
 ### Fixed
