@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.1] - 2026-04-09
+
+### Security
+- Validate model names before passing to CLI spawn (alphanumeric, hyphens, dots only)
+- Cap SSE stream buffer at 1MB to prevent OOM on malformed responses
+- Sanitize CLI stderr output before forwarding to clients
+
 ## [2.1.0] - 2026-04-09
 
 ### Added
