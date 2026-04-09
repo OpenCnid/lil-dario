@@ -1,13 +1,3 @@
-/**
- * Dario — API Proxy Server
- *
- * Sits between your app and the Anthropic API.
- * Transparently swaps API key auth for OAuth bearer tokens.
- *
- * Point any Anthropic SDK client at http://localhost:3456 and it just works.
- * No API key needed — your Claude subscription pays for it.
- */
-
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { execSync, spawn } from 'node:child_process';
@@ -31,25 +21,8 @@ function detectClaudeVersion(): string {
   }
 }
 
-function getOsName(): string {
-  const p = platform;
-  if (p === 'win32') return 'Windows';
-  if (p === 'darwin') return 'MacOS';
-  return 'Linux';
-}
-
-// Persistent session ID per proxy lifetime (like Claude Code does per session)
 const SESSION_ID = randomUUID();
-
-// Detect @anthropic-ai/sdk version from installed package
-function detectSdkVersion(): string {
-  try {
-    const pkg = require('@anthropic-ai/sdk/package.json') as { version?: string };
-    return pkg.version ?? '0.81.0';
-  } catch {
-    return '0.81.0';
-  }
-}
+const OS_NAME = platform === 'win32' ? 'Windows' : platform === 'darwin' ? 'MacOS' : 'Linux';
 
 // Model shortcuts — users can pass short names
 const MODEL_ALIASES: Record<string, string> = {
@@ -58,138 +31,69 @@ const MODEL_ALIASES: Record<string, string> = {
   'haiku': 'claude-haiku-4-5',
 };
 
-// OpenAI model name → Anthropic model name
+// OpenAI model names → Anthropic (fallback if client sends GPT names)
 const OPENAI_MODEL_MAP: Record<string, string> = {
-  'gpt-4.1': 'claude-opus-4-6',
-  'gpt-4.1-mini': 'claude-sonnet-4-6',
-  'gpt-4.1-nano': 'claude-haiku-4-5',
-  'gpt-4o': 'claude-opus-4-6',
-  'gpt-4o-mini': 'claude-haiku-4-5',
-  'gpt-4-turbo': 'claude-opus-4-6',
+  'gpt-5.4': 'claude-opus-4-6',
+  'gpt-5.4-mini': 'claude-sonnet-4-6',
+  'gpt-5.4-nano': 'claude-haiku-4-5',
+  'gpt-5.3': 'claude-opus-4-6',
   'gpt-4': 'claude-opus-4-6',
   'gpt-3.5-turbo': 'claude-haiku-4-5',
-  'o3': 'claude-opus-4-6',
-  'o3-mini': 'claude-sonnet-4-6',
-  'o4-mini': 'claude-sonnet-4-6',
-  'o1': 'claude-opus-4-6',
-  'o1-mini': 'claude-sonnet-4-6',
-  'o1-pro': 'claude-opus-4-6',
 };
 
-/**
- * Translate OpenAI chat completion request → Anthropic Messages request.
- */
+/** Translate OpenAI chat completion request → Anthropic Messages request. */
 function openaiToAnthropic(body: Record<string, unknown>, modelOverride: string | null): Record<string, unknown> {
   const messages = body.messages as Array<{ role: string; content: unknown }> | undefined;
   if (!messages) return body;
-
-  // Extract system messages
   const systemMessages = messages.filter(m => m.role === 'system');
   const nonSystemMessages = messages.filter(m => m.role !== 'system');
-
-  // Map model name
-  const requestModel = String(body.model || '');
-  const model = modelOverride || OPENAI_MODEL_MAP[requestModel] || requestModel;
-
+  const model = modelOverride || OPENAI_MODEL_MAP[String(body.model || '')] || String(body.model || 'claude-opus-4-6');
   const result: Record<string, unknown> = {
     model,
-    messages: nonSystemMessages.map(m => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.content,
-    })),
+    messages: nonSystemMessages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })),
     max_tokens: body.max_tokens ?? body.max_completion_tokens ?? 8192,
   };
-
-  if (systemMessages.length > 0) {
-    result.system = systemMessages.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n');
-  }
-
+  if (systemMessages.length > 0) result.system = systemMessages.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n');
   if (body.stream) result.stream = true;
   if (body.temperature != null) result.temperature = body.temperature;
   if (body.top_p != null) result.top_p = body.top_p;
   if (body.stop) result.stop_sequences = Array.isArray(body.stop) ? body.stop : [body.stop];
-
   return result;
 }
 
-/**
- * Translate Anthropic Messages response → OpenAI chat completion response.
- */
+/** Translate Anthropic Messages response → OpenAI chat completion response. */
 function anthropicToOpenai(body: Record<string, unknown>): Record<string, unknown> {
-  const content = body.content as Array<{ type: string; text?: string }> | undefined;
-  const text = content?.find(c => c.type === 'text')?.text ?? '';
-  const usage = body.usage as { input_tokens?: number; output_tokens?: number } | undefined;
-
+  const text = (body.content as Array<{ type: string; text?: string }> | undefined)?.find(c => c.type === 'text')?.text ?? '';
+  const u = body.usage as { input_tokens?: number; output_tokens?: number } | undefined;
   return {
     id: `chatcmpl-${(body.id as string || '').replace('msg_', '')}`,
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
     model: body.model,
-    choices: [{
-      index: 0,
-      message: { role: 'assistant', content: text },
-      finish_reason: body.stop_reason === 'end_turn' ? 'stop' : body.stop_reason === 'max_tokens' ? 'length' : 'stop',
-    }],
-    usage: {
-      prompt_tokens: usage?.input_tokens ?? 0,
-      completion_tokens: usage?.output_tokens ?? 0,
-      total_tokens: (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0),
-    },
+    choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: body.stop_reason === 'end_turn' ? 'stop' : 'length' }],
+    usage: { prompt_tokens: u?.input_tokens ?? 0, completion_tokens: u?.output_tokens ?? 0, total_tokens: (u?.input_tokens ?? 0) + (u?.output_tokens ?? 0) },
   };
 }
 
-/**
- * Translate Anthropic SSE stream → OpenAI SSE stream.
- */
+/** Translate Anthropic SSE → OpenAI SSE. */
 function translateStreamChunk(line: string): string | null {
   if (!line.startsWith('data: ')) return null;
   const json = line.slice(6).trim();
   if (json === '[DONE]') return 'data: [DONE]\n\n';
-
   try {
-    const event = JSON.parse(json) as Record<string, unknown>;
-
-    if (event.type === 'content_block_delta') {
-      const delta = event.delta as { type: string; text?: string } | undefined;
-      if (delta?.type === 'text_delta' && delta.text) {
-        return `data: ${JSON.stringify({
-          id: 'chatcmpl-dario',
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: 'claude',
-          choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
-        })}\n\n`;
-      }
+    const e = JSON.parse(json) as Record<string, unknown>;
+    if (e.type === 'content_block_delta') {
+      const d = e.delta as { type: string; text?: string } | undefined;
+      if (d?.type === 'text_delta' && d.text)
+        return `data: ${JSON.stringify({ id: 'chatcmpl-dario', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'claude', choices: [{ index: 0, delta: { content: d.text }, finish_reason: null }] })}\n\n`;
     }
-
-    if (event.type === 'message_stop') {
-      return `data: ${JSON.stringify({
-        id: 'chatcmpl-dario',
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model: 'claude',
-        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-      })}\n\ndata: [DONE]\n\n`;
-    }
-  } catch { /* skip unparseable */ }
+    if (e.type === 'message_stop')
+      return `data: ${JSON.stringify({ id: 'chatcmpl-dario', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'claude', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`;
+  } catch {}
   return null;
 }
 
-/**
- * OpenAI-compatible models list.
- */
-function openaiModelsList(): Record<string, unknown> {
-  const models = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'];
-  return {
-    object: 'list',
-    data: models.map(id => ({
-      id,
-      object: 'model',
-      created: 1700000000,
-      owned_by: 'anthropic',
-    })),
-  };
-}
+const OPENAI_MODELS_LIST = { object: 'list', data: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'].map(id => ({ id, object: 'model', created: 1700000000, owned_by: 'anthropic' })) };
 
 interface ProxyOptions {
   port?: number;
@@ -331,11 +235,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   }
 
   const cliVersion = detectClaudeVersion();
-  const sdkVersion = detectSdkVersion();
   const modelOverride = opts.model ? (MODEL_ALIASES[opts.model] ?? opts.model) : null;
   const useCli = opts.cliBackend ?? false;
   let requestCount = 0;
-  let tokenCostEstimate = 0;
 
   // Optional proxy authentication
   const apiKey = process.env.DARIO_API_KEY;
@@ -401,7 +303,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     if (urlPath === '/v1/models' && req.method === 'GET') {
       requestCount++;
       res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': corsOrigin });
-      res.end(JSON.stringify(openaiModelsList()));
+      res.end(JSON.stringify(OPENAI_MODELS_LIST));
       return;
     }
 
@@ -480,9 +382,6 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         console.log(`[dario] #${requestCount} ${req.method} ${req.url}${modelInfo}`);
       }
 
-      // Build target URL from allowlist (no user input in URL construction)
-      const targetUrl = targetBase;
-
       // Merge any client-provided beta flags with the required oauth flag
       const clientBeta = req.headers['anthropic-beta'] as string | undefined;
       const betaFlags = new Set([
@@ -513,15 +412,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         'x-client-request-id': randomUUID(),
         'x-stainless-arch': arch,
         'x-stainless-lang': 'js',
-        'x-stainless-os': getOsName(),
-        'x-stainless-package-version': sdkVersion,
+        'x-stainless-os': OS_NAME,
+        'x-stainless-package-version': '0.81.0',
         'x-stainless-retry-count': '0',
         'x-stainless-runtime': 'node',
         'x-stainless-runtime-version': nodeVersion,
         'x-stainless-timeout': '600',
       };
 
-      const upstream = await fetch(targetUrl, {
+      const upstream = await fetch(targetBase, {
         method: req.method ?? 'POST',
         headers,
         body: finalBody ? new Uint8Array(finalBody) : undefined,
@@ -600,17 +499,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           res.end(responseBody);
         }
 
-        // Quick token estimate for logging
-        if (verbose && responseBody) {
-          try {
-            const parsed = JSON.parse(responseBody) as { usage?: { input_tokens?: number; output_tokens?: number } };
-            if (parsed.usage) {
-              const tokens = (parsed.usage.input_tokens ?? 0) + (parsed.usage.output_tokens ?? 0);
-              tokenCostEstimate += tokens;
-              console.log(`[dario] #${requestCount} ${upstream.status} — ${tokens} tokens (session total: ${tokenCostEstimate})`);
-            }
-          } catch { /* not JSON, skip */ }
-        }
+        if (verbose) console.log(`[dario] #${requestCount} ${upstream.status}`);
       }
     } catch (err) {
       // Log full error server-side, return generic message to client
