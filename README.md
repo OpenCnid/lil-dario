@@ -241,14 +241,30 @@ curl http://localhost:3456/v1/messages \
 
 ```bash
 # OpenClaw
-ANTHROPIC_BASE_URL=http://localhost:3456 ANTHROPIC_API_KEY=dario openclaw
+ANTHROPIC_BASE_URL=http://localhost:3456 ANTHROPIC_API_KEY=dario openclaw start
 
 # Aider
 ANTHROPIC_BASE_URL=http://localhost:3456 ANTHROPIC_API_KEY=dario aider --model claude-opus-4-6
 
+# Cursor / Continue / any OpenAI-compatible tool
+OPENAI_BASE_URL=http://localhost:3456/v1 OPENAI_API_KEY=dario cursor
+
 # Any tool that uses ANTHROPIC_BASE_URL
 ANTHROPIC_BASE_URL=http://localhost:3456 ANTHROPIC_API_KEY=dario your-tool-here
 ```
+
+### Hermes
+
+Add to `~/.hermes/config.yaml`:
+
+```yaml
+model:
+  base_url: "http://localhost:3456/v1"
+  api_key: "dario"
+  default: claude-opus-4-6
+```
+
+Then run `hermes` normally — it routes through dario using your Claude subscription.
 
 ## How It Works
 
