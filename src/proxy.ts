@@ -9,7 +9,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { execSync, spawn } from 'node:child_process';
 import { arch, platform, version as nodeVersion } from 'node:process';
 import { getAccessToken, getStatus } from './oauth.js';
@@ -19,7 +19,6 @@ const DEFAULT_PORT = 3456;
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — generous for large prompts, prevents abuse
 const UPSTREAM_TIMEOUT_MS = 300_000; // 5 min — matches Anthropic SDK default
 const LOCALHOST = '127.0.0.1';
-const CORS_ORIGIN = 'http://localhost';
 
 // Detect installed Claude Code version at startup
 function detectClaudeVersion(): string {
@@ -199,10 +198,13 @@ interface ProxyOptions {
   cliBackend?: boolean;  // Use claude CLI as backend instead of direct API
 }
 
-function sanitizeError(err: unknown): string {
+export function sanitizeError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
-  // Never leak tokens in error messages
-  return msg.replace(/sk-ant-[a-zA-Z0-9_-]+/g, '[REDACTED]');
+  // Never leak tokens, JWTs, or bearer values in error messages
+  return msg
+    .replace(/sk-ant-[a-zA-Z0-9_-]+/g, '[REDACTED]')
+    .replace(/eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/g, '[REDACTED_JWT]')
+    .replace(/Bearer\s+[a-zA-Z0-9_-]+/gi, 'Bearer [REDACTED]');
 }
 
 /**
@@ -333,11 +335,27 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   let requestCount = 0;
   let tokenCostEstimate = 0;
 
+  // Optional proxy authentication
+  const apiKey = process.env.DARIO_API_KEY;
+  const corsOrigin = `http://localhost:${port}`;
+
+  function checkAuth(req: IncomingMessage): boolean {
+    if (!apiKey) return true; // no key set = open access
+    const provided = (req.headers['x-api-key'] as string)
+      || (req.headers.authorization as string)?.replace(/^Bearer\s+/i, '');
+    if (!provided) return false;
+    try {
+      return timingSafeEqual(Buffer.from(provided), Buffer.from(apiKey));
+    } catch {
+      return false;
+    }
+  }
+
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     // CORS preflight
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
-        'Access-Control-Allow-Origin': CORS_ORIGIN,
+        'Access-Control-Allow-Origin': corsOrigin,
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta',
         'Access-Control-Max-Age': '86400',
@@ -362,6 +380,13 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       return;
     }
 
+    // Auth gate — everything below health requires auth when DARIO_API_KEY is set
+    if (!checkAuth(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized', message: 'Invalid or missing API key' }));
+      return;
+    }
+
     // Status endpoint
     if (urlPath === '/status') {
       const s = await getStatus();
@@ -373,7 +398,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // OpenAI-compatible models list
     if (urlPath === '/v1/models' && req.method === 'GET') {
       requestCount++;
-      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': CORS_ORIGIN });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': corsOrigin });
       res.end(JSON.stringify(openaiModelsList()));
       return;
     }
@@ -425,7 +450,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         requestCount++;
         res.writeHead(cliResult.status, {
           'Content-Type': cliResult.contentType,
-          'Access-Control-Allow-Origin': CORS_ORIGIN,
+          'Access-Control-Allow-Origin': corsOrigin,
         });
         res.end(cliResult.body);
         return;
@@ -508,7 +533,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // Forward response headers
       const responseHeaders: Record<string, string> = {
         'Content-Type': contentType || 'application/json',
-        'Access-Control-Allow-Origin': CORS_ORIGIN,
+        'Access-Control-Allow-Origin': corsOrigin,
       };
 
       // Forward rate limit headers (including unified subscription headers)
