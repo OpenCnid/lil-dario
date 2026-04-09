@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.3] - 2026-04-09
+
+### Added
+- Google Gemini independent code review in README
+
 ## [2.2.2] - 2026-04-09
 
 ### Added

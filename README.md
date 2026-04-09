@@ -432,6 +432,10 @@ console.log(status.expiresIn); // "11h 42m"
 >
 > — GitHub Copilot (Microsoft), independent code review
 
+> *"Highly recommended for personal, local development. Solves a massive pain point for developers by bridging Claude Max/Pro subscriptions with developer IDEs, saving substantial API costs. Modular & lean (~1100 lines), modern PKCE auth, SSRF protection, mature CI/CD pipeline with CodeQL and npm provenance attestations."*
+>
+> — Google Gemini, independent code review
+
 ## Trust & Transparency
 
 Dario handles your OAuth tokens. Here's why you can trust it:
