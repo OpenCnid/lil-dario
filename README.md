@@ -32,13 +32,13 @@ export ANTHROPIC_BASE_URL=http://localhost:3456   # or OPENAI_BASE_URL=http://lo
 export ANTHROPIC_API_KEY=dario                    # or OPENAI_API_KEY=dario
 ```
 
-Opus, Sonnet, Haiku — all models, streaming, tool use. Works with OpenClaw, Cursor, Continue, Aider, Hermes, or any tool that speaks the Anthropic or OpenAI API. When rate limited, `--cli` routes through Claude Code for uninterrupted Opus access.
+Opus, Sonnet, Haiku — all models, streaming, tool use. Works with Cursor, Continue, Aider, LiteLLM, Hermes, OpenClaw, or any tool that speaks the Anthropic or OpenAI API. When rate limited, `--cli` routes through Claude Code for uninterrupted Opus access.
 
 ---
 
 ## The Problem
 
-You pay $100-200/mo for Claude Max or Pro. But that subscription only works on claude.ai and Claude Code. If you want to use Claude with **any other tool** — OpenClaw, Cursor, Continue, Aider, your own scripts — you need a separate API key with separate billing.
+You pay $100-200/mo for Claude Max or Pro. But that subscription only works on claude.ai and Claude Code. If you want to use Claude with **any other tool** — Cursor, Continue, Aider, your own scripts — you need a separate API key with separate billing.
 
 **Note:** Claude subscriptions have [usage limits](https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work) that reset on rolling 5-hour and 7-day windows. When exceeded, Opus and Sonnet may return 429 errors while Haiku continues working. You can check your utilization via Claude Code's `/usage` command or [statusline](https://code.claude.com/docs/en/statusline). Use `--cli` mode to route through Claude Code's binary, which is not affected by these limits.
 
@@ -240,14 +240,11 @@ curl http://localhost:3456/v1/messages \
 ### With Other Tools
 
 ```bash
-# OpenClaw
-ANTHROPIC_BASE_URL=http://localhost:3456 ANTHROPIC_API_KEY=dario openclaw start
+# Cursor / Continue / any OpenAI-compatible tool
+OPENAI_BASE_URL=http://localhost:3456/v1 OPENAI_API_KEY=dario cursor
 
 # Aider
 ANTHROPIC_BASE_URL=http://localhost:3456 ANTHROPIC_API_KEY=dario aider --model claude-opus-4-6
-
-# Cursor / Continue / any OpenAI-compatible tool
-OPENAI_BASE_URL=http://localhost:3456/v1 OPENAI_API_KEY=dario cursor
 
 # Any tool that uses ANTHROPIC_BASE_URL
 ANTHROPIC_BASE_URL=http://localhost:3456 ANTHROPIC_API_KEY=dario your-tool-here
@@ -431,7 +428,7 @@ Dario handles your OAuth tokens. Here's why you can trust it:
 
 | Signal | Status |
 |--------|--------|
-| **Source code** | ~1000 lines of TypeScript — small enough to read in one sitting |
+| **Source code** | ~1100 lines of TypeScript — small enough to read in one sitting |
 | **Dependencies** | 1 production dep (`@anthropic-ai/sdk`). Verify: `npm ls --production` |
 | **npm provenance** | Every release is [SLSA attested](https://www.npmjs.com/package/@askalf/dario) via GitHub Actions |
 | **Security scanning** | [CodeQL](https://github.com/askalf/dario/actions/workflows/codeql.yml) runs on every push and weekly |
@@ -453,7 +450,7 @@ cd $(npm root -g)/@askalf/dario && npm ls --production
 
 ## Contributing
 
-PRs welcome. The codebase is ~1000 lines of TypeScript across 4 files:
+PRs welcome. The codebase is ~1100 lines of TypeScript across 4 files:
 
 | File | Purpose |
 |------|---------|
@@ -468,6 +465,15 @@ cd dario
 npm install
 npm run dev   # runs with tsx (no build needed)
 ```
+
+## Also by AskAlf
+
+| Project | What it does |
+|---------|-------------|
+| [platform](https://github.com/askalf/platform) | AI workforce with autonomous agents, teams, memory, and self-healing |
+| [agent](https://github.com/askalf/agent) | Connect any device to the workforce over WebSocket |
+| [claude-re](https://github.com/askalf/claude-re) | Claude Code reimplemented in Python |
+| [amnesia](https://github.com/askalf/amnesia) | Privacy search engine — 155 engines, zero tracking |
 
 ## License
 
