@@ -236,37 +236,57 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
 
   const cliVersion = detectClaudeVersion();
   const modelOverride = opts.model ? (MODEL_ALIASES[opts.model] ?? opts.model) : null;
+
+  // Pre-build static headers (only auth, version, beta, request-id change per request)
+  const staticHeaders: Record<string, string> = {
+    'accept': 'application/json',
+    'Content-Type': 'application/json',
+    'anthropic-dangerous-direct-browser-access': 'true',
+    'anthropic-client-platform': 'cli',
+    'user-agent': `claude-cli/${cliVersion} (external, cli)`,
+    'x-app': 'cli',
+    'x-claude-code-session-id': SESSION_ID,
+    'x-stainless-arch': arch,
+    'x-stainless-lang': 'js',
+    'x-stainless-os': OS_NAME,
+    'x-stainless-package-version': '0.81.0',
+    'x-stainless-retry-count': '0',
+    'x-stainless-runtime': 'node',
+    'x-stainless-runtime-version': nodeVersion,
+    'x-stainless-timeout': '600',
+  };
   const useCli = opts.cliBackend ?? false;
   let requestCount = 0;
 
-  // Optional proxy authentication
+  // Optional proxy authentication — pre-encode key buffer for performance
   const apiKey = process.env.DARIO_API_KEY;
+  const apiKeyBuf = apiKey ? Buffer.from(apiKey) : null;
   const corsOrigin = `http://localhost:${port}`;
 
+  // Pre-serialize static responses
+  const CORS_HEADERS = {
+    'Access-Control-Allow-Origin': corsOrigin,
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta',
+    'Access-Control-Max-Age': '86400',
+  };
+  const MODELS_JSON = JSON.stringify(OPENAI_MODELS_LIST);
+  const ERR_UNAUTH = JSON.stringify({ error: 'Unauthorized', message: 'Invalid or missing API key' });
+  const ERR_FORBIDDEN = JSON.stringify({ error: 'Forbidden', message: 'Path not allowed' });
+  const ERR_METHOD = JSON.stringify({ error: 'Method not allowed' });
+
   function checkAuth(req: IncomingMessage): boolean {
-    if (!apiKey) return true; // no key set = open access
+    if (!apiKeyBuf) return true;
     const provided = (req.headers['x-api-key'] as string)
       || (req.headers.authorization as string)?.replace(/^Bearer\s+/i, '');
     if (!provided) return false;
-    try {
-      return timingSafeEqual(Buffer.from(provided), Buffer.from(apiKey));
-    } catch {
-      return false;
-    }
+    const providedBuf = Buffer.from(provided);
+    if (providedBuf.length !== apiKeyBuf.length) return false;
+    return timingSafeEqual(providedBuf, apiKeyBuf);
   }
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    // CORS preflight
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204, {
-        'Access-Control-Allow-Origin': corsOrigin,
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta',
-        'Access-Control-Max-Age': '86400',
-      });
-      res.end();
-      return;
-    }
+    if (req.method === 'OPTIONS') { res.writeHead(204, CORS_HEADERS); res.end(); return; }
 
     // Strip query parameters for endpoint matching
     const urlPath = req.url?.split('?')[0] ?? '';
@@ -284,12 +304,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       return;
     }
 
-    // Auth gate — everything below health requires auth when DARIO_API_KEY is set
-    if (!checkAuth(req)) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Unauthorized', message: 'Invalid or missing API key' }));
-      return;
-    }
+    if (!checkAuth(req)) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(ERR_UNAUTH); return; }
 
     // Status endpoint
     if (urlPath === '/status') {
@@ -299,13 +314,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       return;
     }
 
-    // OpenAI-compatible models list
-    if (urlPath === '/v1/models' && req.method === 'GET') {
-      requestCount++;
-      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': corsOrigin });
-      res.end(JSON.stringify(OPENAI_MODELS_LIST));
-      return;
-    }
+    if (urlPath === '/v1/models' && req.method === 'GET') { requestCount++; res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': corsOrigin }); res.end(MODELS_JSON); return; }
 
     // Detect OpenAI-format requests
     const isOpenAI = urlPath === '/v1/chat/completions';
@@ -316,18 +325,8 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       '/v1/complete': `${ANTHROPIC_API}/v1/complete`,
     };
     const targetBase = isOpenAI ? `${ANTHROPIC_API}/v1/messages` : allowedPaths[urlPath];
-    if (!targetBase) {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Forbidden', message: 'Path not allowed' }));
-      return;
-    }
-
-    // Only allow POST (Messages/Chat API) and GET (models)
-    if (req.method !== 'POST') {
-      res.writeHead(405, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Method not allowed' }));
-      return;
-    }
+    if (!targetBase) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(ERR_FORBIDDEN); return; }
+    if (req.method !== 'POST') { res.writeHead(405, { 'Content-Type': 'application/json' }); res.end(ERR_METHOD); return; }
 
     // Proxy to Anthropic
     try {
@@ -360,20 +359,13 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         return;
       }
 
-      // Translate OpenAI → Anthropic format if needed
+      // Parse body once, apply OpenAI translation or model override
       let finalBody: Buffer | undefined = body.length > 0 ? body : undefined;
-      if (isOpenAI && body.length > 0) {
+      if (body.length > 0 && (isOpenAI || modelOverride)) {
         try {
           const parsed = JSON.parse(body.toString()) as Record<string, unknown>;
-          const translated = openaiToAnthropic(parsed, modelOverride);
-          finalBody = Buffer.from(JSON.stringify(translated));
-        } catch { /* not JSON, send as-is */ }
-      } else if (modelOverride && body.length > 0) {
-        // Override model in request body if --model flag was set
-        try {
-          const parsed = JSON.parse(body.toString()) as Record<string, unknown>;
-          parsed.model = modelOverride;
-          finalBody = Buffer.from(JSON.stringify(parsed));
+          const result = isOpenAI ? openaiToAnthropic(parsed, modelOverride) : (modelOverride ? { ...parsed, model: modelOverride } : parsed);
+          finalBody = Buffer.from(JSON.stringify(result));
         } catch { /* not JSON, send as-is */ }
       }
 
@@ -382,42 +374,17 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         console.log(`[dario] #${requestCount} ${req.method} ${req.url}${modelInfo}`);
       }
 
-      // Merge any client-provided beta flags with the required oauth flag
+      // Merge client beta flags with defaults
       const clientBeta = req.headers['anthropic-beta'] as string | undefined;
-      const betaFlags = new Set([
-        'oauth-2025-04-20',
-        'interleaved-thinking-2025-05-14',
-        'prompt-caching-scope-2026-01-05',
-        'claude-code-20250219',
-        'context-management-2025-06-27',
-      ]);
-      if (clientBeta) {
-        for (const flag of clientBeta.split(',')) {
-          const trimmed = flag.trim();
-          if (trimmed.length > 0 && trimmed.length < 100) betaFlags.add(trimmed);
-        }
-      }
+      let beta = 'oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,claude-code-20250219,context-management-2025-06-27';
+      if (clientBeta) beta += ',' + clientBeta.split(',').map(f => f.trim()).filter(f => f.length > 0 && f.length < 100).join(',');
 
       const headers: Record<string, string> = {
-        'accept': 'application/json',
+        ...staticHeaders,
         'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
         'anthropic-version': req.headers['anthropic-version'] as string || '2023-06-01',
-        'anthropic-beta': [...betaFlags].join(','),
-        'anthropic-dangerous-direct-browser-access': 'true',
-        'anthropic-client-platform': 'cli',
-        'user-agent': `claude-cli/${cliVersion} (external, cli)`,
-        'x-app': 'cli',
-        'x-claude-code-session-id': SESSION_ID,
+        'anthropic-beta': beta,
         'x-client-request-id': randomUUID(),
-        'x-stainless-arch': arch,
-        'x-stainless-lang': 'js',
-        'x-stainless-os': OS_NAME,
-        'x-stainless-package-version': '0.81.0',
-        'x-stainless-retry-count': '0',
-        'x-stainless-runtime': 'node',
-        'x-stainless-runtime-version': nodeVersion,
-        'x-stainless-timeout': '600',
       };
 
       const upstream = await fetch(targetBase, {
