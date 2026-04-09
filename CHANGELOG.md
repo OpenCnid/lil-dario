@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.4] - 2026-04-09
+
+### Changed
+- Move AI reviews to top of README as 3-column trust table
+- Add Trust link to nav bar
+
 ## [2.2.3] - 2026-04-09
 
 ### Added
