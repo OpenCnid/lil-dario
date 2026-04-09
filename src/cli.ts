@@ -163,6 +163,19 @@ async function help() {
 `);
 }
 
+async function version() {
+  const { readFile } = await import('node:fs/promises');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  try {
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(await readFile(join(dir, '..', 'package.json'), 'utf-8'));
+    console.log(pkg.version);
+  } catch {
+    console.log('unknown');
+  }
+}
+
 // Main
 const commands: Record<string, () => Promise<void>> = {
   login,
@@ -171,8 +184,11 @@ const commands: Record<string, () => Promise<void>> = {
   refresh,
   logout,
   help,
+  version,
   '--help': help,
   '-h': help,
+  '--version': version,
+  '-V': version,
 };
 
 const handler = commands[command];

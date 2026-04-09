@@ -56,11 +56,14 @@ The following are in scope for security reports:
 - Hardcoded API path allowlist (`/v1/messages`, `/v1/complete`, `/v1/chat/completions`) — all other paths return 403
 - Only `GET` and `POST` methods allowed
 - 10 MB request body size limit
+- 30-second request body read timeout (prevents slow-loris)
 - 5-minute upstream timeout
 - Model names validated (alphanumeric, hyphens, dots, underscores only)
 - SSE stream buffer capped at 1MB to prevent OOM
+- CLI output capped at 5MB per stream to prevent OOM
 - CORS scoped to actual proxy port (`http://localhost:{port}`)
 - SSRF protection: hardcoded allowlist — no user input in URL construction
+- Security headers on all responses: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store`
 
 ### Error Sanitization
 - API keys (`sk-ant-*`) redacted from all error messages

@@ -8,6 +8,7 @@ const ANTHROPIC_API = 'https://api.anthropic.com';
 const DEFAULT_PORT = 3456;
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — generous for large prompts, prevents abuse
 const UPSTREAM_TIMEOUT_MS = 300_000; // 5 min — matches Anthropic SDK default
+const BODY_READ_TIMEOUT_MS = 30_000; // 30s — prevents slow-loris on body reads
 const LOCALHOST = '127.0.0.1';
 
 // Detect installed Claude Code version at startup
@@ -108,7 +109,7 @@ export function sanitizeError(err: unknown): string {
   return msg
     .replace(/sk-ant-[a-zA-Z0-9_-]+/g, '[REDACTED]')
     .replace(/eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/g, '[REDACTED_JWT]')
-    .replace(/Bearer\s+[a-zA-Z0-9_-]+/gi, 'Bearer [REDACTED]');
+    .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]');
 }
 
 /**
@@ -171,8 +172,9 @@ async function handleViaCli(
 
       let stdout = '';
       let stderr = '';
-      child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+      const MAX_CLI_OUTPUT = 5_000_000; // 5MB cap per stream — prevents OOM from runaway CLI
+      child.stdout.on('data', (d: Buffer) => { if (stdout.length < MAX_CLI_OUTPUT) stdout += d.toString(); });
+      child.stderr.on('data', (d: Buffer) => { if (stderr.length < MAX_CLI_OUTPUT) stderr += d.toString(); });
 
       child.stdin.write(prompt);
       child.stdin.end();
@@ -263,13 +265,22 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const apiKeyBuf = apiKey ? Buffer.from(apiKey) : null;
   const corsOrigin = `http://localhost:${port}`;
 
+  // Security headers for all responses
+  const SECURITY_HEADERS = {
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Cache-Control': 'no-store',
+  };
+
   // Pre-serialize static responses
   const CORS_HEADERS = {
     'Access-Control-Allow-Origin': corsOrigin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta',
     'Access-Control-Max-Age': '86400',
+    ...SECURITY_HEADERS,
   };
+  const JSON_HEADERS = { 'Content-Type': 'application/json', ...SECURITY_HEADERS };
   const MODELS_JSON = JSON.stringify(OPENAI_MODELS_LIST);
   const ERR_UNAUTH = JSON.stringify({ error: 'Unauthorized', message: 'Invalid or missing API key' });
   const ERR_FORBIDDEN = JSON.stringify({ error: 'Forbidden', message: 'Path not allowed' });
@@ -294,7 +305,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // Health check
     if (urlPath === '/health' || urlPath === '/') {
       const s = await getStatus();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, JSON_HEADERS);
       res.end(JSON.stringify({
         status: 'ok',
         oauth: s.status,
@@ -304,17 +315,17 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       return;
     }
 
-    if (!checkAuth(req)) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(ERR_UNAUTH); return; }
+    if (!checkAuth(req)) { res.writeHead(401, JSON_HEADERS); res.end(ERR_UNAUTH); return; }
 
     // Status endpoint
     if (urlPath === '/status') {
       const s = await getStatus();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, JSON_HEADERS);
       res.end(JSON.stringify(s));
       return;
     }
 
-    if (urlPath === '/v1/models' && req.method === 'GET') { requestCount++; res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': corsOrigin }); res.end(MODELS_JSON); return; }
+    if (urlPath === '/v1/models' && req.method === 'GET') { requestCount++; res.writeHead(200, { ...JSON_HEADERS, 'Access-Control-Allow-Origin': corsOrigin }); res.end(MODELS_JSON); return; }
 
     // Detect OpenAI-format requests
     const isOpenAI = urlPath === '/v1/chat/completions';
@@ -325,35 +336,57 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       '/v1/complete': `${ANTHROPIC_API}/v1/complete`,
     };
     const targetBase = isOpenAI ? `${ANTHROPIC_API}/v1/messages` : allowedPaths[urlPath];
-    if (!targetBase) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(ERR_FORBIDDEN); return; }
-    if (req.method !== 'POST') { res.writeHead(405, { 'Content-Type': 'application/json' }); res.end(ERR_METHOD); return; }
+    if (!targetBase) { res.writeHead(403, JSON_HEADERS); res.end(ERR_FORBIDDEN); return; }
+    if (req.method !== 'POST') { res.writeHead(405, JSON_HEADERS); res.end(ERR_METHOD); return; }
 
     // Proxy to Anthropic
     try {
       const accessToken = await getAccessToken();
 
-      // Read request body with size limit
+      // Read request body with size limit and timeout (prevents slow-loris)
       const chunks: Buffer[] = [];
       let totalBytes = 0;
-      for await (const chunk of req) {
-        const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
-        totalBytes += buf.length;
-        if (totalBytes > MAX_BODY_BYTES) {
-          res.writeHead(413, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Request body too large', max: `${MAX_BODY_BYTES / 1024 / 1024}MB` }));
-          return;
+      const bodyTimeout = setTimeout(() => { req.destroy(); }, BODY_READ_TIMEOUT_MS);
+      try {
+        for await (const chunk of req) {
+          const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+          totalBytes += buf.length;
+          if (totalBytes > MAX_BODY_BYTES) {
+            clearTimeout(bodyTimeout);
+            res.writeHead(413, JSON_HEADERS);
+            res.end(JSON.stringify({ error: 'Request body too large', max: `${MAX_BODY_BYTES / 1024 / 1024}MB` }));
+            return;
+          }
+          chunks.push(buf);
         }
-        chunks.push(buf);
+      } finally {
+        clearTimeout(bodyTimeout);
       }
       const body = Buffer.concat(chunks);
 
-      // CLI backend mode: route through claude --print
-      if (useCli && urlPath === '/v1/messages' && req.method === 'POST' && body.length > 0) {
-        const cliResult = await handleViaCli(body, modelOverride, verbose);
+      // CLI backend mode: route through claude --print (works for both Anthropic and OpenAI endpoints)
+      if (useCli && req.method === 'POST' && body.length > 0) {
+        let cliBody = body;
+        // Translate OpenAI format before passing to CLI
+        if (isOpenAI) {
+          try {
+            const parsed = JSON.parse(body.toString()) as Record<string, unknown>;
+            cliBody = Buffer.from(JSON.stringify(openaiToAnthropic(parsed, modelOverride)));
+          } catch { /* send as-is */ }
+        }
+        const cliResult = await handleViaCli(cliBody, modelOverride, verbose);
         requestCount++;
+        // Translate CLI response back to OpenAI format if needed
+        if (isOpenAI && cliResult.status >= 200 && cliResult.status < 300) {
+          try {
+            const parsed = JSON.parse(cliResult.body) as Record<string, unknown>;
+            cliResult.body = JSON.stringify(anthropicToOpenai(parsed));
+          } catch { /* send as-is */ }
+        }
         res.writeHead(cliResult.status, {
           'Content-Type': cliResult.contentType,
           'Access-Control-Allow-Origin': corsOrigin,
+          ...SECURITY_HEADERS,
         });
         res.end(cliResult.body);
         return;
@@ -402,6 +435,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       const responseHeaders: Record<string, string> = {
         'Content-Type': contentType || 'application/json',
         'Access-Control-Allow-Origin': corsOrigin,
+        ...SECURITY_HEADERS,
       };
 
       // Forward rate limit headers (including unified subscription headers)
@@ -471,7 +505,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     } catch (err) {
       // Log full error server-side, return generic message to client
       console.error('[dario] Proxy error:', sanitizeError(err));
-      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.writeHead(502, JSON_HEADERS);
       res.end(JSON.stringify({ error: 'Proxy error', message: 'Failed to reach upstream API' }));
     }
   });

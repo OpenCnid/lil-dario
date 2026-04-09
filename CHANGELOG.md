@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0] - 2026-04-09
+
+### Security
+- Add 30-second body read timeout to prevent slow-loris attacks
+- Cap CLI backend stdout/stderr at 5MB to prevent OOM on runaway output
+- Broaden Bearer token redaction regex — tokens with dots/slashes no longer leak
+- Add security headers to all responses (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store`)
+
+### Fixed
+- CLI backend (`--cli`) now works with OpenAI-compatible endpoint (`/v1/chat/completions`)
+  - Previously, `--cli` + Cursor/Continue would bypass CLI and hit API directly
+  - Now translates OpenAI → Anthropic before CLI, and Anthropic → OpenAI after
+
+### Added
+- `dario version` / `dario --version` / `dario -V` command
+
 ## [2.1.2] - 2026-04-09
 
 ### Changed
