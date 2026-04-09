@@ -88,6 +88,7 @@ Usage:
   ANTHROPIC_BASE_URL=http://localhost:3456
   ANTHROPIC_API_KEY=dario
 
+Auth: open (no DARIO_API_KEY set)
 OAuth: healthy (expires in 11h 42m)
 Model: passthrough (client decides)
 ```
@@ -294,12 +295,13 @@ ANTHROPIC_BASE_URL=http://localhost:3456 ANTHROPIC_API_KEY=dario your-tool-here
 
 ### Proxy Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
+| Flag/Env | Description | Default |
+|----------|-------------|---------|
 | `--cli` | Use Claude CLI as backend (bypasses rate limits) | off |
 | `--model=MODEL` | Force a model (`opus`, `sonnet`, `haiku`, or full ID) | passthrough |
 | `--port=PORT` | Port to listen on | `3456` |
 | `--verbose` / `-v` | Log every request | off |
+| `DARIO_API_KEY` | If set, all endpoints (except `/health`) require matching `x-api-key` header or `Authorization: Bearer` header | unset (open) |
 
 ## Supported Features
 
