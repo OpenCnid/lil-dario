@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
+import { randomUUID, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { execSync, spawn } from 'node:child_process';
 import { readFileSync, readdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -41,12 +41,10 @@ function computeBuildTag(userMessage: string, version: string): string {
   return createHash('sha256').update(`${BILLING_SEED}${chars}${version}`).digest('hex').slice(0, 3);
 }
 
-// Compute per-request cch checksum matching Claude Code's algorithm:
-// SHA-256(seed + chars[4,7,20] of user message + version).slice(0,5)
-// Real Claude Code uses a similar but separate computation that produces 5 hex chars
-function computeCch(userMessage: string, version: string): string {
-  const chars = [4, 7, 20].map(i => userMessage[i] || '0').join('');
-  return createHash('sha256').update(`${BILLING_SEED}${version}${chars}`).digest('hex').slice(0, 5);
+// Per-request cch: real Claude Code generates a random 5-char hex value each request.
+// Confirmed via MITM: 10 identical requests → 10 unique cch values, no deterministic pattern.
+function computeCch(): string {
+  return randomBytes(3).toString('hex').slice(0, 5);
 }
 
 // Detect installed Claude Code binary at startup (single exec for both version + availability)
@@ -737,7 +735,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             // Build per-request billing tag matching Claude Code binary
             const userMsg = extractFirstUserMessage(r);
             const buildTag = computeBuildTag(userMsg, cliVersion);
-            const cch = computeCch(userMsg, cliVersion);
+            const cch = computeCch();
             const fullVersion = `${cliVersion}.${buildTag}`;
             const billingTag = `x-anthropic-billing-header: cc_version=${fullVersion}; cc_entrypoint=cli; cch=${cch};`;
 
@@ -804,7 +802,6 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         'Authorization': `Bearer ${accessToken}`,
         'anthropic-version': req.headers['anthropic-version'] as string || '2023-06-01',
         'anthropic-beta': beta,
-        'x-client-request-id': randomUUID(),
         // Real Claude Code sends 600 on first request, 300 on subsequent
         'x-stainless-timeout': requestCount <= 1 ? '600' : '300',
       };

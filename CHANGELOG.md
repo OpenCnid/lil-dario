@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.7] - 2026-04-10
+
+### Fixed
+- **`cch` now uses `crypto.randomBytes`**: MITM testing proved real Claude Code generates a random 5-hex-char `cch` per request (10 identical requests → 10 unique values). Previous SHA-256 approach was deterministic and detectable.
+- **Removed `x-client-request-id` header**: Real Claude Code does not send this header for external OAuth sessions (only for firstParty deployments). Dario was adding it, creating a detectable mismatch.
+- **Confirmed build tag algorithm**: Verified `Oz$` via 5 identical captures — build tag is deterministic from `SHA-256(seed + user_chars[4,7,20] + version).slice(0,3)`, confirmed matching real Claude Code output.
+
 ## [2.8.6] - 2026-04-10
 
 ### Changed
