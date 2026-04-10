@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.0] - 2026-04-10
+
+### Changed
+- **Full Claude Code feature parity**: Request body now matches native Claude Code exactly — `thinking`, `context_management`, full beta set, device identity
+- **Billing classification confirmed**: MITM analysis proves billing is determined solely by the OAuth token's subscription type, not by headers, betas, or metadata. All previous billing-related workarounds were unnecessary.
+- Restored `context-management-2025-06-27` and `prompt-caching-scope-2026-01-05` beta flags (safe for all subscription types — confirmed via A/B testing against Anthropic API)
+- Only `extended-cache-ttl-*` is filtered from client betas (the only prefix that actually requires Extra Usage)
+
+### Added
+- **Extended thinking**: Automatically enables `thinking` with budget matching `max_tokens` (matches Claude Code default behavior)
+- **Context management**: Injects `context_management` body field for automatic thinking compaction
+- **Billing classification logging**: First request and verbose mode log the unified rate limit claim and overage utilization
+
 ## [2.4.0] - 2026-04-10
 
 ### Fixed

@@ -87,12 +87,12 @@ const MODEL_ALIASES: Record<string, string> = {
   'haiku': 'claude-haiku-4-5',
 };
 
-// Beta prefixes that trigger Extra Usage billing on Max subscriptions.
-// Stripping these prevents surprise charges while keeping caching/thinking/1M active.
+// Beta prefixes that require Extra Usage to be ENABLED on the account.
+// context-management and prompt-caching-scope are safe — billing is determined
+// solely by the OAuth token's subscription type, not by beta flags.
+// Only extended-cache-ttl actually requires Extra Usage availability.
 const BILLABLE_BETA_PREFIXES = [
-  'extended-cache-ttl-',   // Extended cache TTLs beyond default
-  'context-management-',   // Auto-compaction / context management
-  'prompt-caching-scope-', // Extended prompt caching scope
+  'extended-cache-ttl-',   // Extended cache TTLs — requires Extra Usage enabled
 ];
 
 /** Filter out billable betas from client-provided beta header. */
@@ -579,9 +579,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             parsed.model = (modelOverride as string).replace('[1m]', '');
           }
           const result = isOpenAI ? openaiToAnthropic(parsed, modelOverride) : (modelOverride ? { ...parsed, model: modelOverride } : parsed);
-          // Inject device identity metadata — required for Max plan billing classification
-          if (identity.deviceId && typeof result === 'object' && result !== null) {
-            (result as Record<string, unknown>).metadata = {
+          const r = result as Record<string, unknown>;
+          // Inject device identity metadata for session tracking
+          if (identity.deviceId) {
+            r.metadata = {
               user_id: JSON.stringify({
                 device_id: identity.deviceId,
                 account_uuid: identity.accountUuid,
@@ -589,7 +590,19 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               }),
             };
           }
-          finalBody = Buffer.from(JSON.stringify(result));
+          // Enable extended thinking (matches Claude Code default)
+          // budget_tokens must be >= 1024, and max_tokens must accommodate it
+          if (!r.thinking) {
+            const clientMax = (r.max_tokens as number) || 8192;
+            const maxTokens = Math.max(clientMax, 16000);
+            r.max_tokens = maxTokens;
+            r.thinking = { budget_tokens: maxTokens - 1, type: 'enabled' };
+          }
+          // Enable context management (matches Claude Code default)
+          if (!r.context_management) {
+            r.context_management = { edits: [{ type: 'clear_thinking_20251015', keep: 'all' }] };
+          }
+          finalBody = Buffer.from(JSON.stringify(r));
         } catch { /* not JSON, send as-is */ }
       }
 
@@ -598,11 +611,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         console.log(`[dario] #${requestCount} ${req.method} ${urlPath}${modelInfo}`);
       }
 
-      // Conservative beta defaults — only betas confirmed safe for Max plans.
-      // context-management and prompt-caching-scope stripped: even with metadata.user_id,
-      // these may independently trigger Extra Usage billing (reported by @belangertrading).
+      // Beta defaults — matches native Claude Code v2.1.98 headers exactly.
+      // Billing classification is determined by the OAuth token alone, not beta flags.
+      // context-management and prompt-caching-scope are safe for all subscription types.
       const clientBeta = req.headers['anthropic-beta'] as string | undefined;
-      let beta = 'oauth-2025-04-20,interleaved-thinking-2025-05-14,claude-code-20250219,advisor-tool-2026-03-01';
+      let beta = 'oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,advisor-tool-2026-03-01';
       if (clientBeta) {
         const filtered = filterBillableBetas(clientBeta);
         if (filtered) beta += ',' + filtered;
@@ -642,6 +655,17 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       }
 
       requestCount++;
+
+      // Log billing classification on first request or in verbose mode
+      const billingClaim = upstream.headers.get('anthropic-ratelimit-unified-representative-claim');
+      const overageUtil = upstream.headers.get('anthropic-ratelimit-unified-overage-utilization');
+      if (requestCount === 1 || verbose) {
+        if (billingClaim) {
+          const overagePct = overageUtil ? `${Math.round(parseFloat(overageUtil) * 100)}%` : '?';
+          console.log(`[dario] #${requestCount} billing: ${billingClaim} (overage: ${overagePct})`);
+        }
+      }
+
       res.writeHead(upstream.status, responseHeaders);
 
       if (isStream && upstream.body) {
