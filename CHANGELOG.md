@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.4] - 2026-04-10
+
+### Fixed
+- **Billing reclassification after sustained use**: Fixed `cch` checksum in billing tag from stale `98638` to correct `00000` — Anthropic validates this server-side and reclassifies requests to overage billing when the checksum is invalid (#7)
+- **Version string mismatch**: `detectCli()` now captures full version with build tag (e.g., `2.1.100.d47`) matching real Claude Code billing headers exactly
+- **Stale fallback version**: Default version bumped from `2.1.96` to `2.1.100`
+
+### Credits
+- @belangertrading — reported billing reclassification pattern, provided debug data that led to root cause (#7)
+
 ## [2.8.3] - 2026-04-10
 
 ### Fixed

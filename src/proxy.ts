@@ -37,10 +37,12 @@ function detectCli(): string {
   try {
     const out = execSync('claude --version', { timeout: 5000, stdio: 'pipe' }).toString().trim();
     cliAvailable = true;
-    return out.match(/^([\d.]+)/)?.[1] ?? '2.1.96';
+    // Capture full version including build tag (e.g., 2.1.100.d47)
+    // Claude Code uses this exact string in the billing header
+    return out.match(/^([\d]+\.[\d]+\.[\d]+(?:\.[\w]+)?)/)?.[1] ?? '2.1.100';
   } catch {
     cliAvailable = false;
-    return '2.1.96';
+    return '2.1.100';
   }
 }
 
@@ -700,7 +702,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             // instead of the general API quota. Without it, Opus/Sonnet get 429
             // when overall utilization is high, even though model-specific limits
             // have headroom. The CLI binary embeds this in its system prompt.
-            const billingTag = `x-anthropic-billing-header: cc_version=${cliVersion}; cc_entrypoint=cli; cch=98638;`;
+            const billingTag = `x-anthropic-billing-header: cc_version=${cliVersion}; cc_entrypoint=cli; cch=00000;`;
             if (typeof r.system === 'string') {
               if (!r.system.includes('x-anthropic-billing-header:')) {
                 r.system = billingTag + '\n' + r.system;
