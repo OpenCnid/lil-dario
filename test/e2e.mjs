@@ -14,8 +14,10 @@ let testNum = 0;
 function log(label, status, details) {
   testNum++;
   const icon = status === 'PASS' ? '\u2705' : status === 'FAIL' ? '\u274C' : '\u26A0\uFE0F';
-  console.log(`${icon} #${testNum} ${label}: ${details}`);
-  results.push({ num: testNum, label, status, details });
+  // Sanitize any token-like values from test output (satisfies CodeQL js/clear-text-logging)
+  const safe = String(details).replace(/eyJ[a-zA-Z0-9_-]+/g, '[REDACTED]');
+  console.log(`${icon} #${testNum} ${label}: ${safe}`);
+  results.push({ num: testNum, label, status, details: safe });
 }
 
 function extractRateLimitInfo(headers) {
