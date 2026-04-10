@@ -15,6 +15,9 @@ All notable changes to this project will be documented in this file.
 - **Context management**: Injects `context_management` body field for automatic thinking compaction
 - **Billing classification logging**: First request and verbose mode log the unified rate limit claim and overage utilization
 
+### Credits
+- @belangertrading — reported billing classification issue, tested v2.3.1 through v2.5.0, confirmed fix via response header analysis (#4)
+
 ## [2.4.0] - 2026-04-10
 
 ### Fixed
@@ -107,7 +110,7 @@ All notable changes to this project will be documented in this file.
 - Shared `sanitizeError` across all error paths (eliminated duplication)
 
 ### Security
-- Credit: @GodsBoy (cherry-picked from PR #2)
+- Credit: @GodsBoy (cherry-picked from PR #2), @belangertrading (billing investigation #4)
 
 ## [2.0.0] - 2026-04-08
 

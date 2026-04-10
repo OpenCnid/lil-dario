@@ -387,7 +387,7 @@ Then run `hermes` normally — it routes through dario using your Claude subscri
 - Tool use / function calling
 - System prompts and multi-turn conversations
 - Prompt caching and extended thinking
-- **Billable beta filtering** — strips `extended-cache-ttl`, `context-management`, `prompt-caching-scope` from client betas to prevent surprise Extra Usage charges
+- **Billable beta filtering** — strips `extended-cache-ttl` from client betas (the only prefix requiring Extra Usage)
 - **Orchestration tag sanitization** — strips agent-injected XML (`<system-reminder>`, `<env>`, `<task_metadata>`, etc.) before forwarding
 - **Token anomaly detection** — warns on context spike (>60% input growth) or output explosion (>2x previous)
 - Concurrency control (max 10 concurrent upstream requests)
@@ -530,6 +530,13 @@ cd dario
 npm install
 npm run dev   # runs with tsx (no build needed)
 ```
+
+## Contributors
+
+| Who | Contributions |
+|-----|---------------|
+| [@GodsBoy](https://github.com/GodsBoy) | Proxy authentication, token redaction, error sanitization ([#2](https://github.com/askalf/dario/pull/2)) |
+| [@belangertrading](https://github.com/belangertrading) | Billing classification investigation — reported, tested 5 versions, confirmed fix via response header analysis ([#4](https://github.com/askalf/dario/issues/4)) |
 
 ## Also by AskAlf
 
