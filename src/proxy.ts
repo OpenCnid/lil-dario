@@ -630,13 +630,17 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               }),
             };
           }
-          // Enable extended thinking (matches Claude Code default)
-          // budget_tokens must be >= 1024, and max_tokens must accommodate it
+          // Enable adaptive thinking (matches Claude Code default)
+          // adaptive lets the model decide when/how much to think — preferred for Opus/Sonnet 4.6
           if (!r.thinking) {
+            r.thinking = { type: 'adaptive' };
+            // Ensure max_tokens is reasonable for thinking models
             const clientMax = (r.max_tokens as number) || 8192;
-            const maxTokens = Math.max(clientMax, 16000);
-            r.max_tokens = maxTokens;
-            r.thinking = { budget_tokens: maxTokens - 1, type: 'enabled' };
+            r.max_tokens = Math.max(clientMax, 16000);
+          }
+          // Request priority capacity when available
+          if (!r.service_tier) {
+            r.service_tier = 'auto';
           }
           // Enable context management (matches Claude Code default)
           if (!r.context_management) {
@@ -675,7 +679,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // Billing classification is determined by the OAuth token alone, not beta flags.
       // context-management and prompt-caching-scope are safe for all subscription types.
       const clientBeta = req.headers['anthropic-beta'] as string | undefined;
-      let beta = 'oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,advisor-tool-2026-03-01';
+      let beta = 'oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,advisor-tool-2026-03-01,effort-2025-11-24';
       if (clientBeta) {
         const filtered = filterBillableBetas(clientBeta);
         if (filtered) beta += ',' + filtered;

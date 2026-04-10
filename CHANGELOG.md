@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.7.0] - 2026-04-10
+
+### Changed
+- **Adaptive thinking**: Switched from deprecated `thinking: { type: 'enabled', budget_tokens: N }` to `{ type: 'adaptive' }` — model decides when and how much to think, matching Claude Code behavior exactly
+- **Priority capacity**: Requests now include `service_tier: 'auto'` to access priority capacity pool when available (50% fallback allocation confirmed via response headers)
+- **Effort beta**: Added `effort-2025-11-24` beta flag matching CLI v2.1.100
+
 ## [2.6.0] - 2026-04-10
 
 ### Fixed
