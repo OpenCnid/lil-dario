@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.2] - 2026-04-10
+
+### Fixed
+- **CLI E2BIG on large conversations**: System prompt now written to temp file via `--append-system-prompt-file` instead of passed as command-line argument, removing the OS arg size limit (~2MB) that crashed multi-turn agent conversations (#7)
+
 ## [2.8.1] - 2026-04-10
 
 ### Fixed

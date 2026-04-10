@@ -1,9 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { execSync, spawn } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { arch, platform, version as nodeVersion } from 'node:process';
 import { getAccessToken, getStatus } from './oauth.js';
 
@@ -393,8 +393,14 @@ async function handleViaCli(
       const historyText = history.map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`).join('\n');
       systemPrompt = systemPrompt ? `${systemPrompt}\n\nConversation history:\n${historyText}` : `Conversation history:\n${historyText}`;
     }
+
+    // Write system prompt to temp file instead of passing as arg to avoid E2BIG
+    // on large conversation contexts (OS arg size limit ~2MB)
+    let systemPromptFile: string | null = null;
     if (systemPrompt) {
-      args.push('--append-system-prompt', systemPrompt);
+      systemPromptFile = join(tmpdir(), `dario-sysprompt-${randomUUID()}.txt`);
+      writeFileSync(systemPromptFile, systemPrompt, { mode: 0o600 });
+      args.push('--append-system-prompt-file', systemPromptFile);
     }
 
     if (verbose) {
@@ -403,6 +409,9 @@ async function handleViaCli(
 
     // Spawn claude --print
     return new Promise((resolve) => {
+      // Cleanup temp file when done
+      const cleanup = () => { if (systemPromptFile) try { unlinkSync(systemPromptFile); } catch {} };
+
       const child = spawn('claude', args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 300_000,
@@ -418,6 +427,7 @@ async function handleViaCli(
       child.stdin.end();
 
       child.on('close', (code) => {
+        cleanup();
         if (code !== 0 || !stdout.trim()) {
           resolve({
             status: 502,
@@ -447,6 +457,7 @@ async function handleViaCli(
       });
 
       child.on('error', (err) => {
+        cleanup();
         resolve({
           status: 502,
           body: JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Claude CLI not found. Install Claude Code first.' } }),
