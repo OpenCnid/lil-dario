@@ -11,11 +11,18 @@ const BASE = process.env.DARIO_TEST_URL || 'http://127.0.0.1:3456';
 const results = [];
 let testNum = 0;
 
+/** Strip tokens, keys, and bearer values from strings before logging. */
+function sanitize(s) {
+  return String(s)
+    .replace(/eyJ[a-zA-Z0-9_-]+/g, '[REDACTED]')
+    .replace(/sk-ant-[a-zA-Z0-9_-]+/g, '[REDACTED]')
+    .replace(/Bearer [^\s"]+/gi, 'Bearer [REDACTED]');
+}
+
 function log(label, status, details) {
   testNum++;
   const icon = status === 'PASS' ? '\u2705' : status === 'FAIL' ? '\u274C' : '\u26A0\uFE0F';
-  // Sanitize any token-like values from test output (satisfies CodeQL js/clear-text-logging)
-  const safe = String(details).replace(/eyJ[a-zA-Z0-9_-]+/g, '[REDACTED]');
+  const safe = sanitize(details);
   console.log(`${icon} #${testNum} ${label}: ${safe}`);
   results.push({ num: testNum, label, status, details: safe });
 }
@@ -274,7 +281,7 @@ async function main() {
 
   if (failed > 0) {
     console.log('\nFailed:');
-    for (const r of results.filter(r => r.status === 'FAIL')) console.log(`  #${r.num} ${r.label}: ${r.details}`);
+    for (const r of results.filter(r => r.status === 'FAIL')) console.log(`  #${r.num} ${r.label}: ${sanitize(r.details)}`);
     process.exit(1);
   }
 }
