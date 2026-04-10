@@ -1,6 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { execSync, spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { arch, platform, version as nodeVersion } from 'node:process';
 import { getAccessToken, getStatus } from './oauth.js';
 
@@ -42,12 +45,129 @@ function detectClaudeVersion(): string {
 const SESSION_ID = randomUUID();
 const OS_NAME = platform === 'win32' ? 'Windows' : platform === 'darwin' ? 'MacOS' : 'Linux';
 
+// Claude Code device identity — required for Max plan billing classification.
+// Without metadata.user_id, Anthropic classifies requests as third-party and
+// routes them to Extra Usage billing instead of the Max plan allocation.
+function loadClaudeIdentity(): { deviceId: string; accountUuid: string } {
+  const paths = [
+    join(homedir(), '.claude.json'),              // Windows / Linux / macOS (live config)
+    join(homedir(), '.claude', '.claude.json'),    // Alternative location
+    join(homedir(), '.claude', 'claude.json'),
+  ];
+  // Also check backup files as fallback
+  try {
+    const backupDir = join(homedir(), '.claude', 'backups');
+    const files = require('fs').readdirSync(backupDir) as string[];
+    const backups = files
+      .filter((f: string) => f.startsWith('.claude.json.backup.'))
+      .sort()
+      .reverse();
+    for (const b of backups) paths.push(join(backupDir, b));
+  } catch { /* no backups dir */ }
+
+  for (const p of paths) {
+    try {
+      const data = JSON.parse(readFileSync(p, 'utf-8'));
+      if (data.userID) {
+        // accountUuid lives inside oauthAccount, not at root
+        const accountUuid = data.oauthAccount?.accountUuid ?? data.accountUuid ?? '';
+        return { deviceId: data.userID, accountUuid };
+      }
+    } catch { /* try next */ }
+  }
+  return { deviceId: '', accountUuid: '' };
+}
+
 // Model shortcuts — users can pass short names
 const MODEL_ALIASES: Record<string, string> = {
   'opus': 'claude-opus-4-6',
+  'opus1m': 'claude-opus-4-6[1m]',
   'sonnet': 'claude-sonnet-4-6',
+  'sonnet1m': 'claude-sonnet-4-6[1m]',
   'haiku': 'claude-haiku-4-5',
 };
+
+// Beta prefixes that trigger Extra Usage billing on Max subscriptions.
+// Stripping these prevents surprise charges while keeping caching/thinking/1M active.
+const BILLABLE_BETA_PREFIXES = [
+  'extended-cache-ttl-',   // Extended cache TTLs beyond default
+  'context-management-',   // Auto-compaction / context management
+  'prompt-caching-scope-', // Extended prompt caching scope
+];
+
+/** Filter out billable betas from client-provided beta header. */
+function filterBillableBetas(betas: string): string {
+  return betas.split(',').map(b => b.trim()).filter(b =>
+    b.length > 0 && !BILLABLE_BETA_PREFIXES.some(p => b.startsWith(p))
+  ).join(',');
+}
+
+// Orchestration tags injected by agents (Aider, Cursor, OpenCode, etc.)
+// that confuse Claude when passed through. Strip before forwarding.
+const ORCHESTRATION_TAG_NAMES = [
+  'system-reminder', 'env', 'system_information', 'current_working_directory',
+  'operating_system', 'default_shell', 'home_directory', 'task_metadata',
+  'tool_exec', 'tool_output', 'skill_content', 'skill_files',
+  'directories', 'available_skills', 'thinking',
+];
+const ORCHESTRATION_PATTERNS = ORCHESTRATION_TAG_NAMES.flatMap(tag => [
+  new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi'),
+  new RegExp(`<${tag}\\b[^>]*\\/>`, 'gi'),
+]);
+
+/** Strip orchestration wrapper tags from message content. */
+function sanitizeContent(text: string): string {
+  let result = text;
+  for (const pattern of ORCHESTRATION_PATTERNS) {
+    pattern.lastIndex = 0;
+    result = result.replace(pattern, '');
+  }
+  return result.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Strip orchestration tags from all messages in a request body. */
+function sanitizeMessages(body: Record<string, unknown>): void {
+  const messages = body.messages as Array<{ role: string; content: unknown }> | undefined;
+  if (!messages) return;
+  for (const msg of messages) {
+    if (typeof msg.content === 'string') {
+      msg.content = sanitizeContent(msg.content);
+    } else if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (typeof block === 'object' && block && 'text' in block && typeof (block as { text: string }).text === 'string') {
+          (block as { text: string }).text = sanitizeContent((block as { text: string }).text);
+        }
+      }
+    }
+  }
+}
+
+// Token anomaly detection — warns on suspicious patterns before billing surprises
+interface TokenSnapshot { inputTokens: number; outputTokens: number; cacheRead: number; }
+let lastTokenSnapshot: TokenSnapshot | null = null;
+
+function checkTokenAnomalies(usage: Record<string, number>, requestId: string): void {
+  const current: TokenSnapshot = {
+    inputTokens: usage.input_tokens ?? 0,
+    outputTokens: usage.output_tokens ?? 0,
+    cacheRead: usage.cache_read_input_tokens ?? 0,
+  };
+  if (lastTokenSnapshot && lastTokenSnapshot.inputTokens > 0) {
+    const growth = (current.inputTokens - lastTokenSnapshot.inputTokens) / lastTokenSnapshot.inputTokens;
+    if (growth > 0.6) {
+      const pct = Math.round(growth * 100);
+      console.warn(`[dario] TOKEN WARN ${requestId}: Input grew ${pct}% (${lastTokenSnapshot.inputTokens} → ${current.inputTokens}). Possible full replay.`);
+    }
+    if (current.outputTokens > lastTokenSnapshot.outputTokens * 2 && current.outputTokens > 2000) {
+      console.warn(`[dario] TOKEN WARN ${requestId}: Output explosion ${current.outputTokens} tokens (${Math.round(current.outputTokens / lastTokenSnapshot.outputTokens)}x previous).`);
+    }
+  }
+  lastTokenSnapshot = current;
+}
+
+// Extended context fallback — cooldown after 1M context failure
+let extendedContextUnavailableAt = 0;
+const EXTENDED_CONTEXT_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
 
 // OpenAI model names → Anthropic (fallback if client sends GPT names)
 const OPENAI_MODEL_MAP: Record<string, string> = {
@@ -283,6 +403,13 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
 
   const cliVersion = detectClaudeVersion();
   const modelOverride = opts.model ? (MODEL_ALIASES[opts.model] ?? opts.model) : null;
+  const identity = loadClaudeIdentity();
+  if (identity.deviceId) {
+    console.log('  Device identity: detected');
+  } else {
+    console.warn('[dario] WARNING: No Claude Code device identity found. Requests may be billed as Extra Usage.');
+    console.warn('[dario] Run Claude Code at least once to generate ~/.claude/.claude.json');
+  }
 
   // Pre-build static headers (only auth, version, beta, request-id change per request)
   const staticHeaders: Record<string, string> = {
@@ -377,11 +504,12 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     const isOpenAI = urlPath === '/v1/chat/completions';
 
     // Allowlisted API paths — only these are proxied (prevents SSRF)
+    // ?beta=true matches native Claude Code behavior for billing classification
     const allowedPaths: Record<string, string> = {
-      '/v1/messages': `${ANTHROPIC_API}/v1/messages`,
+      '/v1/messages': `${ANTHROPIC_API}/v1/messages?beta=true`,
       '/v1/complete': `${ANTHROPIC_API}/v1/complete`,
     };
-    const targetBase = isOpenAI ? `${ANTHROPIC_API}/v1/messages` : allowedPaths[urlPath];
+    const targetBase = isOpenAI ? `${ANTHROPIC_API}/v1/messages?beta=true` : allowedPaths[urlPath];
     if (!targetBase) { res.writeHead(403, JSON_HEADERS); res.end(ERR_FORBIDDEN); return; }
     if (req.method !== 'POST') { res.writeHead(405, JSON_HEADERS); res.end(ERR_METHOD); return; }
 
@@ -439,12 +567,28 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         return;
       }
 
-      // Parse body once, apply OpenAI translation or model override
+      // Parse body once, apply OpenAI translation, model override, and sanitization
       let finalBody: Buffer | undefined = body.length > 0 ? body : undefined;
-      if (body.length > 0 && (isOpenAI || modelOverride)) {
+      if (body.length > 0) {
         try {
           const parsed = JSON.parse(body.toString()) as Record<string, unknown>;
+          // Strip orchestration tags from messages (Aider, Cursor, etc.)
+          sanitizeMessages(parsed);
+          // Handle 1M context: strip [1m] suffix if in cooldown
+          if (modelOverride?.includes('[1m]') && extendedContextUnavailableAt > 0 && Date.now() - extendedContextUnavailableAt < EXTENDED_CONTEXT_COOLDOWN_MS) {
+            parsed.model = (modelOverride as string).replace('[1m]', '');
+          }
           const result = isOpenAI ? openaiToAnthropic(parsed, modelOverride) : (modelOverride ? { ...parsed, model: modelOverride } : parsed);
+          // Inject device identity metadata — required for Max plan billing classification
+          if (identity.deviceId && typeof result === 'object' && result !== null) {
+            (result as Record<string, unknown>).metadata = {
+              user_id: JSON.stringify({
+                device_id: identity.deviceId,
+                account_uuid: identity.accountUuid,
+                session_id: SESSION_ID,
+              }),
+            };
+          }
           finalBody = Buffer.from(JSON.stringify(result));
         } catch { /* not JSON, send as-is */ }
       }
@@ -454,13 +598,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         console.log(`[dario] #${requestCount} ${req.method} ${urlPath}${modelInfo}`);
       }
 
-      // Merge client beta flags with required defaults.
-      // Only include betas that are essential for OAuth + standard features.
-      // Avoid betas that may require Extra Usage (context-management, prompt-caching-scope).
-      // Client-provided betas pass through — the client controls its own feature set.
+      // Beta flags matching native Claude Code v2.1.98.
+      // context-management and prompt-caching-scope are safe when metadata.user_id
+      // is present — billing classification depends on device identity, not betas.
       const clientBeta = req.headers['anthropic-beta'] as string | undefined;
-      let beta = 'oauth-2025-04-20,interleaved-thinking-2025-05-14,claude-code-20250219';
-      if (clientBeta) beta += ',' + clientBeta.split(',').map(f => f.trim()).filter(f => f.length > 0 && f.length < 100).join(',');
+      let beta = 'oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,advisor-tool-2026-03-01';
+      if (clientBeta) {
+        const filtered = filterBillableBetas(clientBeta);
+        if (filtered) beta += ',' + filtered;
+      }
 
       const headers: Record<string, string> = {
         ...staticHeaders,
@@ -537,6 +683,21 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       } else {
         // Buffer and forward
         const responseBody = await upstream.text();
+
+        // Check for extended context failure — cooldown to avoid repeated failures
+        if (upstream.status === 400 && responseBody.includes('extra_usage') && modelOverride?.includes('[1m]')) {
+          extendedContextUnavailableAt = Date.now();
+          console.warn('[dario] 1M context requires Extra Usage — falling back to standard context for 1 hour');
+        }
+
+        // Token anomaly detection on non-streaming responses
+        if (upstream.status >= 200 && upstream.status < 300) {
+          try {
+            const parsed = JSON.parse(responseBody) as Record<string, unknown>;
+            const usage = parsed.usage as Record<string, number> | undefined;
+            if (usage) checkTokenAnomalies(usage, responseHeaders['request-id'] ?? '');
+          } catch { /* ignore parse errors */ }
+        }
 
         if (isOpenAI && upstream.status >= 200 && upstream.status < 300) {
           // Translate Anthropic response → OpenAI format
