@@ -68,7 +68,7 @@ Opus, Sonnet, Haiku — all models, streaming, tool use. Works with Cursor, Cont
 <tr>
 <td colspan="3" valign="top">
 
-*"The 429s were driving us crazy running a multi-agent stack on Claude Max. You found the billing tag, fixed the checksum, reverse-engineered the per-request hash from the binary — v2.8.5 running clean, zero reclassification."* — [@belangertrading](https://github.com/belangertrading), multi-agent stack on Claude Max
+*"The 429s were driving us crazy running a multi-agent stack on Claude Max. You found the billing tag, fixed the checksum, reverse-engineered the per-request hash from the binary — running clean, zero reclassification."* — [@belangertrading](https://github.com/belangertrading), multi-agent stack on Claude Max
 
 </td>
 </tr>
@@ -87,7 +87,7 @@ dario is the only proxy that solves this. It injects native Claude Code device i
 | **Billing classification** | Native Claude Code session | Third-party (Extra Usage) |
 | **Max plan limits** | Used correctly | Bypassed — billed separately |
 | **Device identity** | Injected automatically | Missing |
-| **Priority routing** | Billing tag + service_tier auto | Missing |
+| **Priority routing** | Full billing tag fingerprint | Missing |
 | **Billing tag fingerprint** | Per-request SHA-256 matching binary RE | Static or missing |
 | **Beta flags** | Match Claude Code v2.1.100 | Outdated or missing |
 | **Billable beta filtering** | Strips surprise charges | Passes everything through |
@@ -215,7 +215,7 @@ Model: claude-opus-4-6 (all requests)
 
 ## Passthrough Mode
 
-For tools like Hermes or OpenClaw that need exact Anthropic protocol fidelity, use `--passthrough`. This does OAuth swap only — no billing tag, no thinking injection, no device identity, no extra beta flags.
+For tools that need exact Anthropic protocol fidelity with zero modification, use `--passthrough`. This does OAuth swap only — no billing tag, no thinking injection, no device identity, no extra beta flags. Note: most tools (including Hermes and OpenClaw) work better through default mode, which handles billing classification and token optimization automatically.
 
 ```bash
 dario proxy --passthrough               # Thin proxy, zero injection
@@ -417,9 +417,9 @@ Then run `hermes` normally — it routes through dario using your Claude subscri
 ### Direct API Mode
 - All Claude models (Opus 4.6, Sonnet 4.6, Haiku 4.5) + 1M extended context aliases (`opus1m`, `sonnet1m`)
 - **Native billing classification** — device identity, per-request billing tag with SHA-256 checksums matching real Claude Code (extracted via binary RE), ensures Max plan limits work correctly
-- **Priority routing** — billing tag injection + `service_tier: 'auto'` activates per-model rate limits, keeping Opus/Sonnet available even at 100% overall utilization
+- **Stealth layer** (v2.9.0) — strips thinking blocks from conversation history (saves 50-80% input tokens), scrubs non-CC fields (`temperature`, `top_p`, `top_k`, `stop_sequences`, `service_tier`), reorders JSON fields to match Claude Code's exact field order, and normalizes system prompts to exactly 3 blocks. Every request is indistinguishable from real Claude Code traffic.
 - **Adaptive thinking** — matches Claude Code's `{ type: 'adaptive' }` mode for optimal reasoning (auto-skipped for Haiku 4.5)
-- **Effort control** — injects `output_config: { effort: 'high' }` by default, or passes through client-specified effort level
+- **Effort control** — injects `output_config: { effort: 'medium' }` matching Claude Code's default, or passes through client-specified effort level
 - **Enriched 429 errors** — rate limit errors include utilization %, limiting window, and reset time instead of Anthropic's default `"Error"` message
 - **Auto CLI fallback** — if the API returns 429 and Claude Code is installed, transparently retries through `claude --print` with SSE conversion
 - **OpenAI-compatible** (`/v1/chat/completions`) — works with any OpenAI SDK or tool
@@ -428,6 +428,7 @@ Then run `hermes` normally — it routes through dario using your Claude subscri
 - System prompts and multi-turn conversations
 - Prompt caching and extended thinking
 - **Billable beta filtering** — strips `extended-cache-ttl` from client betas (the only prefix requiring Extra Usage)
+- **Beta deduplication** — client-provided betas are deduplicated against the base set before appending
 - **Orchestration tag sanitization** — strips agent-injected XML (`<system-reminder>`, `<env>`, `<task_metadata>`, etc.) before forwarding
 - **Token anomaly detection** — warns on context spike (>60% input growth) or output explosion (>2x previous)
 - Concurrency control (max 10 concurrent upstream requests)
@@ -442,9 +443,9 @@ Then run `hermes` normally — it routes through dario using your Claude subscri
 
 ### Passthrough Mode
 - All Claude models with native streaming and tool use
-- OAuth token swap only — no billing tag, thinking, effort, service_tier, or device identity injection
+- OAuth token swap only — no billing tag, thinking, effort, or device identity injection
 - Minimal beta flags (`oauth-2025-04-20` + client betas only)
-- For tools like Hermes or OpenClaw that need exact Anthropic protocol fidelity
+- For tools that need exact Anthropic protocol fidelity with zero modification
 
 ## Endpoints
 

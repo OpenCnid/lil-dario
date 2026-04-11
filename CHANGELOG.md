@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.9.1] - 2026-04-11
+
+### Changed
+- Updated README with v2.9.0 stealth layer documentation
+- Corrected effort default from `high` to `medium` in feature list
+- Removed `service_tier: auto` reference (now scrubbed)
+- Updated passthrough mode description (Hermes/OpenClaw work through default mode)
+
 ## [2.9.0] - 2026-04-11
 
 ### Added
