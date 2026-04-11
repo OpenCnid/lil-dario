@@ -790,9 +790,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         if (clientBeta) beta += ',' + clientBeta;
       } else {
         // Claude-optimized: full beta set matching real Claude Code (exact order from MITM capture)
-        beta = 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24';
+        beta = 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24,fast-mode-2026-02-01';
         if (clientBeta) {
-          const filtered = filterBillableBetas(clientBeta);
+          const baseSet = new Set(beta.split(','));
+          const filtered = filterBillableBetas(clientBeta)
+            .split(',').filter(b => b.length > 0 && !baseSet.has(b)).join(',');
           if (filtered) beta += ',' + filtered;
         }
       }
