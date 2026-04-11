@@ -33,7 +33,7 @@ export ANTHROPIC_BASE_URL=http://localhost:3456   # or OPENAI_BASE_URL=http://lo
 export ANTHROPIC_API_KEY=dario                    # or OPENAI_API_KEY=dario
 ```
 
-Opus, Sonnet, Haiku — all models, streaming, tool use. Works with Cursor, Continue, Aider, LiteLLM, Hermes, OpenClaw, or any tool that speaks the Anthropic or OpenAI API. When rate limited, `--cli` routes through Claude Code for uninterrupted Opus access.
+Opus, Sonnet, Haiku — all models, streaming, tool use. **Zero dependencies.** ~1,600 lines of TypeScript. Works with Cursor, Continue, Aider, LiteLLM, Hermes, OpenClaw, or any tool that speaks the Anthropic or OpenAI API. When rate limited, `--cli` routes through Claude Code for uninterrupted Opus access.
 
 <table>
 <tr>
