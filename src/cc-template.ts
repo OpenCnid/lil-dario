@@ -82,6 +82,7 @@ export function buildCCRequest(
   billingTag: string,
   cache1h: { type: 'ephemeral'; ttl: '1h' },
   identity: { deviceId: string; accountUuid: string; sessionId: string },
+  opts: { preserveTools?: boolean } = {},
 ): { body: Record<string, unknown>; toolMap: Map<string, ToolMapping>; unmappedTools: string[] } {
 
   const model = clientBody.model as string || 'claude-sonnet-4-6';
@@ -104,10 +105,15 @@ export function buildCCRequest(
   }
 
   // ── Build tool mapping ──
+  // In preserveTools mode, skip the tool name/arg rewriting entirely.
+  // Tool routing in real agents requires bidirectional schema fidelity that
+  // lossy forward-only translation can't provide. Users with custom tool
+  // schemas should use preserveTools to keep their tools as-is and accept
+  // the fingerprint risk on their own account.
   const activeToolMap = new Map<string, ToolMapping>();
   const unmappedTools: string[] = [];
 
-  if (clientTools) {
+  if (clientTools && !opts.preserveTools) {
     for (const tool of clientTools) {
       const name = (tool.name as string || '').toLowerCase();
       const mapping = TOOL_MAP[name];
@@ -139,31 +145,27 @@ export function buildCCRequest(
   }
 
   // ── Remap tool_use and tool_result references in message history ──
-  // Track tool_use_id → CC tool name for consistent remapping
-  const toolUseIdMap = new Map<string, string>();
-
-  for (const msg of messages) {
-    if (Array.isArray(msg.content)) {
-      for (const block of msg.content as Array<Record<string, unknown>>) {
-        if (block.type === 'tool_use' && typeof block.name === 'string') {
-          const mapping = activeToolMap.get(block.name);
-          if (mapping) {
-            block.name = mapping.ccTool;
-            if (mapping.translateArgs && block.input) {
-              block.input = mapping.translateArgs(block.input as Record<string, unknown>);
+  // Skip in preserveTools mode — leave conversation history untouched.
+  if (!opts.preserveTools) {
+    for (const msg of messages) {
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content as Array<Record<string, unknown>>) {
+          if (block.type === 'tool_use' && typeof block.name === 'string') {
+            const mapping = activeToolMap.get(block.name);
+            if (mapping) {
+              block.name = mapping.ccTool;
+              if (mapping.translateArgs && block.input) {
+                block.input = mapping.translateArgs(block.input as Record<string, unknown>);
+              }
             }
           }
-          // Track the ID so tool_results stay consistent
-          if (typeof block.id === 'string') {
-            toolUseIdMap.set(block.id, block.name as string);
-          }
-        }
-        // Strip any client-specific fields from tool_result blocks that CC wouldn't send
-        if (block.type === 'tool_result') {
-          // Remove non-standard fields clients may add
-          for (const key of Object.keys(block)) {
-            if (!['type', 'tool_use_id', 'content', 'is_error'].includes(key)) {
-              delete block[key];
+          // Strip any client-specific fields from tool_result blocks that CC wouldn't send
+          if (block.type === 'tool_result') {
+            // Remove non-standard fields clients may add
+            for (const key of Object.keys(block)) {
+              if (!['type', 'tool_use_id', 'content', 'is_error'].includes(key)) {
+                delete block[key];
+              }
             }
           }
         }
@@ -239,9 +241,11 @@ export function buildCCRequest(
     ],
   };
 
-  // Tools come before metadata in CC's key order
+  // Tools come before metadata in CC's key order.
+  // preserveTools mode: pass client tools through unchanged (better for real
+  // agents with custom schemas, but loses the CC tool fingerprint).
   if (clientTools && clientTools.length > 0) {
-    ccRequest.tools = CC_TOOL_DEFINITIONS;
+    ccRequest.tools = opts.preserveTools ? clientTools : CC_TOOL_DEFINITIONS;
   }
 
   // Metadata

@@ -351,6 +351,7 @@ interface ProxyOptions {
   model?: string;  // Override model in all requests
   cliBackend?: boolean;  // Use claude CLI as backend instead of direct API
   passthrough?: boolean;  // Thin proxy — OAuth swap only, no injection
+  preserveTools?: boolean;  // Keep client tool schemas (for agents with custom tools)
 }
 
 export function sanitizeError(err: unknown): string {
@@ -733,6 +734,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             const { body: ccBody, toolMap } = buildCCRequest(
               r, billingTag, CACHE_1H,
               { deviceId: identity.deviceId, accountUuid: identity.accountUuid, sessionId: SESSION_ID },
+              { preserveTools: opts.preserveTools ?? false },
             );
 
             // Store tool map for response reverse-mapping
