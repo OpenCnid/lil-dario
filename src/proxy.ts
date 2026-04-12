@@ -552,7 +552,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     'accept': 'application/json',
     'Content-Type': 'application/json',
     'anthropic-dangerous-direct-browser-access': 'true',
-    'user-agent': `claude-cli/${cliVersion} (external, cli, workload/cron)`,
+    'user-agent': `claude-cli/${cliVersion} (external, cli)`,
     'x-app': 'cli',
     'x-claude-code-session-id': SESSION_ID,
     'x-stainless-arch': arch,
@@ -718,12 +718,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             const buildTag = computeBuildTag(userMsg, cliVersion);
             const cch = computeCch();
             const fullVersion = `${cliVersion}.${buildTag}`;
-            const billingTag = `x-anthropic-billing-header: cc_version=${fullVersion}; cc_entrypoint=cli; cch=${cch}; cc_workload=cron;`;
-            const AGENT_IDENTITY = 'You are a Claude agent, built on Anthropic\'s Claude Agent SDK.';
+            const billingTag = `x-anthropic-billing-header: cc_version=${fullVersion}; cc_entrypoint=cli; cch=${cch};`;
             const CACHE_1H = { type: 'ephemeral' as const, ttl: '1h' as const };
 
             const { body: ccBody, toolMap } = buildCCRequest(
-              r, billingTag, AGENT_IDENTITY, CACHE_1H,
+              r, billingTag, CACHE_1H,
               { deviceId: identity.deviceId, accountUuid: identity.accountUuid, sessionId: SESSION_ID },
             );
 

@@ -1,152 +1,38 @@
 /**
- * Claude Code request template — the exact tool definitions, system structure,
- * and request shape that real Claude Code sends.
+ * Claude Code request template — auto-extracted from CC v2.1.104 MITM capture.
  *
- * Instead of transforming third-party requests signal-by-signal, we replace
- * the entire request with a CC template and inject only the conversation content.
- * The upstream sees a genuine CC request. Anthropic can't detect it without
- * flagging their own binary.
- *
- * Source: MITM capture + binary RE of Claude Code v2.1.100
+ * Tool definitions, system prompt, and request structure are loaded from
+ * cc-template-data.json (extracted via MITM proxy from real CC session).
+ * This ensures byte-level fidelity with real CC requests.
  */
 
-/** Claude Code's exact tool definitions (from binary RE + MITM capture). */
-export const CC_TOOL_DEFINITIONS = [
-  {
-    name: 'Bash',
-    description: 'Execute a bash command and return its output. The working directory persists between commands. Use this for system commands, file operations, git, npm, etc.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        command: { type: 'string' as const, description: 'The command to execute' },
-        timeout: { type: 'number' as const, description: 'Optional timeout in milliseconds (max 600000)' },
-      },
-      required: ['command'],
-    },
-  },
-  {
-    name: 'Read',
-    description: 'Reads a file from the local filesystem. The file_path parameter must be an absolute path.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        file_path: { type: 'string' as const, description: 'The absolute path to the file to read' },
-        offset: { type: 'integer' as const, description: 'The line number to start reading from' },
-        limit: { type: 'integer' as const, description: 'The number of lines to read' },
-      },
-      required: ['file_path'],
-    },
-  },
-  {
-    name: 'Write',
-    description: 'Writes a file to the local filesystem. This tool will overwrite the existing file if there is one.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        file_path: { type: 'string' as const, description: 'The absolute path to the file to write' },
-        content: { type: 'string' as const, description: 'The content to write to the file' },
-      },
-      required: ['file_path', 'content'],
-    },
-  },
-  {
-    name: 'Edit',
-    description: 'Performs exact string replacements in files. The edit will FAIL if old_string is not unique in the file.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        file_path: { type: 'string' as const, description: 'The absolute path to the file to modify' },
-        old_string: { type: 'string' as const, description: 'The text to replace' },
-        new_string: { type: 'string' as const, description: 'The text to replace it with' },
-        replace_all: { type: 'boolean' as const, description: 'Replace all occurrences', default: false },
-      },
-      required: ['file_path', 'old_string', 'new_string'],
-    },
-  },
-  {
-    name: 'Glob',
-    description: 'Fast file pattern matching tool that works with any codebase size. Returns matching file paths.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        pattern: { type: 'string' as const, description: 'The glob pattern to match files against' },
-        path: { type: 'string' as const, description: 'The directory to search in' },
-      },
-      required: ['pattern'],
-    },
-  },
-  {
-    name: 'Grep',
-    description: 'A powerful search tool built on ripgrep. Supports full regex syntax.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        pattern: { type: 'string' as const, description: 'The regular expression pattern to search for' },
-        path: { type: 'string' as const, description: 'File or directory to search in' },
-        output_mode: { type: 'string' as const, enum: ['content', 'files_with_matches', 'count'], description: 'Output mode' },
-      },
-      required: ['pattern'],
-    },
-  },
-  {
-    name: 'WebFetch',
-    description: 'Fetches a URL from the internet and returns the content.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        url: { type: 'string' as const, description: 'The URL to fetch' },
-      },
-      required: ['url'],
-    },
-  },
-  {
-    name: 'WebSearch',
-    description: 'Searches the web using a search engine and returns results.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        query: { type: 'string' as const, description: 'The search query' },
-      },
-      required: ['query'],
-    },
-  },
-  {
-    name: 'NotebookEdit',
-    description: 'Edits a Jupyter notebook cell.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        notebook_path: { type: 'string' as const, description: 'Path to the notebook file' },
-        cell_number: { type: 'integer' as const, description: 'Cell number to edit' },
-        new_source: { type: 'string' as const, description: 'New cell source code' },
-      },
-      required: ['notebook_path', 'cell_number', 'new_source'],
-    },
-  },
-  {
-    name: 'Agent',
-    description: 'Launch a new agent to handle complex tasks. The agent runs in an isolated context.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        prompt: { type: 'string' as const, description: 'The task for the agent to perform' },
-        description: { type: 'string' as const, description: 'A short description of the task' },
-      },
-      required: ['description', 'prompt'],
-    },
-  },
-  {
-    name: 'AskUserQuestion',
-    description: 'Ask the user a question and wait for their response.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        question: { type: 'string' as const, description: 'The question to ask' },
-      },
-      required: ['question'],
-    },
-  },
-];
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+interface TemplateData {
+  _version: string;
+  agent_identity: string;
+  system_prompt: string;
+  tools: Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
+  tool_names: string[];
+}
+
+// Load template data at module init — fail fast if missing
+const TEMPLATE: TemplateData = JSON.parse(
+  readFileSync(join(__dirname, 'cc-template-data.json'), 'utf-8'),
+);
+
+/** CC's exact tool definitions — loaded from MITM capture. */
+export const CC_TOOL_DEFINITIONS = TEMPLATE.tools;
+
+/** CC's static system prompt (~25KB). */
+export const CC_SYSTEM_PROMPT = TEMPLATE.system_prompt;
+
+/** CC's agent identity string. */
+export const CC_AGENT_IDENTITY = TEMPLATE.agent_identity;
 
 /** Client tool name → CC tool mapping with parameter translation. */
 interface ToolMapping {
@@ -194,7 +80,6 @@ const TOOL_MAP: Record<string, ToolMapping> = {
 export function buildCCRequest(
   clientBody: Record<string, unknown>,
   billingTag: string,
-  agentIdentity: string,
   cache1h: { type: 'ephemeral'; ttl: '1h' },
   identity: { deviceId: string; accountUuid: string; sessionId: string },
 ): { body: Record<string, unknown>; toolMap: Map<string, ToolMapping>; unmappedTools: string[] } {
@@ -335,13 +220,22 @@ export function buildCCRequest(
   // ── Build the CC request from template ──
   // Key order matches CC v2.1.104 MITM capture exactly:
   // model, messages, system, tools, metadata, max_tokens, thinking, context_management, output_config, stream
+  //
+  // System prompt structure (3 blocks, matching real CC):
+  //   [0] billing tag (no cache)
+  //   [1] agent identity (1h cache)
+  //   [2] CC's full 25KB system prompt + client's custom prompt appended (1h cache)
+  const fullSystemPrompt = systemText
+    ? `${CC_SYSTEM_PROMPT}\n\n${systemText}`
+    : CC_SYSTEM_PROMPT;
+
   const ccRequest: Record<string, unknown> = {
     model,
     messages,
     system: [
       { type: 'text', text: billingTag },
-      { type: 'text', text: agentIdentity, cache_control: cache1h },
-      { type: 'text', text: systemText || 'You are a helpful assistant.', cache_control: cache1h },
+      { type: 'text', text: CC_AGENT_IDENTITY, cache_control: cache1h },
+      { type: 'text', text: fullSystemPrompt, cache_control: cache1h },
     ],
   };
 

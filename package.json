@@ -1,6 +1,6 @@
 {
   "name": "@askalf/dario",
-  "version": "3.0.4",
+  "version": "3.1.0",
   "description": "Use your Claude subscription as an API. No API key needed. Local proxy for Claude Max/Pro subscriptions.",
   "type": "module",
   "bin": {
@@ -20,7 +20,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/cc-template-data.json dist/",
     "audit": "npm audit --production --audit-level=high",
     "prepublishOnly": "npm run build",
     "start": "node dist/cli.js",
