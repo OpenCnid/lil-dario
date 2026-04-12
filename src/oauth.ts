@@ -18,6 +18,9 @@ const OAUTH_SCOPES = 'org:create_api_key user:profile user:inference user:sessio
 
 // Refresh 30 min before expiry
 const REFRESH_BUFFER_MS = 30 * 60 * 1000;
+// After a failed refresh, don't retry for 60s to avoid spam
+let lastRefreshFailure = 0;
+const REFRESH_COOLDOWN_MS = 60 * 1000;
 
 // In-memory credential cache — avoids disk reads on every request
 let credentialsCache: CredentialsFile | null = null;
@@ -259,6 +262,8 @@ async function doRefreshTokens(): Promise<OAuthTokens> {
     });
 
     if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      console.error(`[dario] Refresh attempt ${attempt + 1}/3 failed: HTTP ${res.status} — ${errBody.slice(0, 200)}`);
       if (res.status === 401 || res.status === 403) {
         throw new Error(`Refresh token rejected (${res.status}). Run \`dario login\` to re-authenticate.`);
       }
@@ -301,10 +306,21 @@ export async function getAccessToken(): Promise<string> {
     return oauth.accessToken;
   }
 
-  // Need refresh
+  // Need refresh — but don't spam if we just failed
+  if (Date.now() - lastRefreshFailure < REFRESH_COOLDOWN_MS) {
+    // Still in cooldown from a recent failure, use current token even if expiring
+    return oauth.accessToken;
+  }
   console.log('[dario] Token expiring soon, refreshing...');
-  const refreshed = await refreshTokens();
-  return refreshed.accessToken;
+  try {
+    const refreshed = await refreshTokens();
+    return refreshed.accessToken;
+  } catch (err) {
+    lastRefreshFailure = Date.now();
+    console.error(`[dario] Refresh failed: ${err instanceof Error ? err.message : err}. Will retry in 60s. Run \`dario login\` if this persists.`);
+    // Return current token — it might still work for a few more minutes
+    return oauth.accessToken;
+  }
 }
 
 /**
