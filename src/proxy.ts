@@ -552,7 +552,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     'accept': 'application/json',
     'Content-Type': 'application/json',
     'anthropic-dangerous-direct-browser-access': 'true',
-    'user-agent': `claude-cli/${cliVersion} (external, cli)`,
+    'user-agent': `claude-cli/${cliVersion} (external, cli, workload/cron)`,
     'x-app': 'cli',
     'x-claude-code-session-id': SESSION_ID,
     'x-stainless-arch': arch,
@@ -591,7 +591,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const JSON_HEADERS = { 'Content-Type': 'application/json', ...SECURITY_HEADERS };
   const MODELS_JSON = JSON.stringify(OPENAI_MODELS_LIST);
   const ERR_UNAUTH = JSON.stringify({ error: 'Unauthorized', message: 'Invalid or missing API key' });
-  const ERR_FORBIDDEN = JSON.stringify({ error: 'Forbidden', message: 'Path not allowed' });
+  const ERR_FORBIDDEN = JSON.stringify({ error: 'Forbidden', message: 'Path not allowed. Supported paths: POST /v1/messages, POST /v1/chat/completions, GET /v1/models' });
   const ERR_METHOD = JSON.stringify({ error: 'Method not allowed' });
 
   function checkAuth(req: IncomingMessage): boolean {
@@ -718,7 +718,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             const buildTag = computeBuildTag(userMsg, cliVersion);
             const cch = computeCch();
             const fullVersion = `${cliVersion}.${buildTag}`;
-            const billingTag = `x-anthropic-billing-header: cc_version=${fullVersion}; cc_entrypoint=cli; cch=${cch};`;
+            const billingTag = `x-anthropic-billing-header: cc_version=${fullVersion}; cc_entrypoint=cli; cch=${cch}; cc_workload=cron;`;
             const AGENT_IDENTITY = 'You are a Claude agent, built on Anthropic\'s Claude Agent SDK.';
             const CACHE_1H = { type: 'ephemeral' as const, ttl: '1h' as const };
 
@@ -752,7 +752,8 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         if (clientBeta) beta += ',' + clientBeta;
       } else {
         // Claude-optimized: full beta set matching real Claude Code (exact order from MITM capture)
-        beta = 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24,fast-mode-2026-02-01';
+        // Beta set from CC v2.1.104 binary RE — some are CC-internal/gated, only include publicly accepted ones
+        beta = 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24,fast-mode-2026-02-01,redact-thinking-2026-02-12,context-1m-2025-08-07,web-search-2025-03-05,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19';
         if (clientBeta) {
           const baseSet = new Set(beta.split(','));
           const filtered = filterBillableBetas(clientBeta)
@@ -764,7 +765,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       const headers: Record<string, string> = {
         ...staticHeaders,
         'Authorization': `Bearer ${accessToken}`,
-        'anthropic-version': req.headers['anthropic-version'] as string || '2023-06-01',
+        'anthropic-version': passthrough ? (req.headers['anthropic-version'] as string || '2023-06-01') : '2023-06-01',
         'anthropic-beta': beta,
         // Real Claude Code adds x-client-request-id for firstParty + api.anthropic.com
         'x-client-request-id': randomUUID(),

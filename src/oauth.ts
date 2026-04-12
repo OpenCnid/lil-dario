@@ -138,7 +138,7 @@ export async function startAutoOAuthFlow(): Promise<OAuthTokens> {
     });
 
     let port = 0;
-    server.listen(0, 'localhost', () => {
+    server.listen(0, 'localhost', async () => {
       const addr = server.address();
       port = typeof addr === 'object' && addr ? addr.port : 0;
 
@@ -161,7 +161,7 @@ export async function startAutoOAuthFlow(): Promise<OAuthTokens> {
       console.log('');
 
       // Open browser using platform-specific commands (no external deps)
-      const { exec } = require('node:child_process') as typeof import('node:child_process');
+      const { exec } = await import('node:child_process');
       const cmd = process.platform === 'win32' ? `start "" "${authUrl}"`
         : process.platform === 'darwin' ? `open "${authUrl}"`
         : `xdg-open "${authUrl}"`;
