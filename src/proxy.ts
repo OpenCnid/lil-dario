@@ -801,11 +801,21 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       });
 
-      // Auto-retry without context-1m if it triggers a long-context billing error
-      if (upstream.status === 429 && !passthrough) {
-        const peekBody = await upstream.text().catch(() => '');
-        if (peekBody.includes('long context') || peekBody.includes('Extra usage is required')) {
-          if (verbose) console.log(`[dario] #${requestCount} context-1m rejected — retrying without it`);
+      // Auto-retry without context-1m if it triggers a long-context billing error.
+      // Anthropic returns this as either 400 ("long context beta is not yet available
+      // for this subscription") or 429 ("Extra usage is required for long context
+      // requests") depending on the endpoint — we handle both.
+      //
+      // Note: `upstream.text()` consumes the body, so once we peek we MUST
+      // handle the response here (can't fall through to the normal forwarder).
+      let peekedBody: string | null = null;
+      if ((upstream.status === 400 || upstream.status === 429) && !passthrough) {
+        peekedBody = await upstream.text().catch(() => '');
+        const isLongContextError = peekedBody.includes('long context')
+          || peekedBody.includes('Extra usage is required')
+          || peekedBody.includes('long_context');
+        if (isLongContextError) {
+          if (verbose) console.log(`[dario] #${requestCount} context-1m rejected (${upstream.status}) — retrying without it`);
           const reducedBeta = beta.replace(',context-1m-2025-08-07', '').replace('context-1m-2025-08-07,', '');
           const retryHeaders = { ...headers, 'anthropic-beta': reducedBeta };
           const retry = await fetch(targetBase, {
@@ -814,12 +824,12 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             body: finalBody ? new Uint8Array(finalBody) : undefined,
             signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
           });
-          // Use the retry response from here on
+          // Use the retry response from here on — peeked body is now stale
           upstream = retry;
-        } else {
-          // Not a context-1m issue — handle as normal 429 below
-          // Re-wrap the already-consumed body for downstream handling
-          const enriched = enrich429(peekBody, upstream.headers);
+          peekedBody = null;
+        } else if (upstream.status === 429) {
+          // Not a context-1m issue — return enriched 429 directly
+          const enriched = enrich429(peekedBody, upstream.headers);
           if (!(cliAvailable && !useCli)) {
             const responseHeaders: Record<string, string> = {
               'Content-Type': 'application/json',
@@ -836,7 +846,23 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             res.end(enriched);
             return;
           }
-          // Fall through to CLI fallback below
+          // Fall through to CLI fallback below — need to re-handle 429 with
+          // already-consumed body; stash it for the fallback path.
+        } else if (upstream.status === 400) {
+          // Non-long-context 400 — forward upstream error directly.
+          // The body is already consumed, so we write it straight out.
+          const responseHeaders: Record<string, string> = {
+            'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
+            'Access-Control-Allow-Origin': corsOrigin,
+            ...SECURITY_HEADERS,
+          };
+          for (const [key, value] of upstream.headers.entries()) {
+            if (key === 'request-id') responseHeaders[key] = value;
+          }
+          requestCount++;
+          res.writeHead(400, responseHeaders);
+          res.end(peekedBody);
+          return;
         }
       }
 

@@ -9,14 +9,18 @@ import { randomBytes, createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { detectCCOAuthConfig } from './cc-oauth-detect.js';
 
-// Claude Code's public OAuth client (PKCE, no secret needed) — extracted from CC v2.1.104 binary
-const OAUTH_CLIENT_ID = '22422756-60c9-4084-8eb7-27705fd5cf9a';
-// Max Plan OAuth (for Claude Pro/Max subscriptions) — claude.com/cai/oauth/authorize
-const OAUTH_AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize';
-const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
-// Max plan scopes (excludes org:create_api_key which requires Console plan)
-const OAUTH_SCOPES = 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload';
+// OAuth config is auto-detected at runtime from the installed Claude Code
+// binary. This eliminates the "Anthropic rotated the client_id again" class
+// of bugs — dario stays in sync with whatever CC version the user has
+// installed, forever. See cc-oauth-detect.ts for the scanner.
+//
+// Hardcoded fallbacks live in cc-oauth-detect.ts and are the known-good
+// CC v2.1.104 local-oauth flow values.
+async function getOAuthConfig() {
+  return detectCCOAuthConfig();
+}
 
 // Refresh 30 min before expiry
 const REFRESH_BUFFER_MS = 30 * 60 * 1000;
@@ -147,18 +151,19 @@ export async function startAutoOAuthFlow(): Promise<OAuthTokens> {
       const addr = server.address();
       port = typeof addr === 'object' && addr ? addr.port : 0;
 
+      const cfg = await getOAuthConfig();
       const params = new URLSearchParams({
         code: 'true',
-        client_id: OAUTH_CLIENT_ID,
+        client_id: cfg.clientId,
         response_type: 'code',
         redirect_uri: `http://localhost:${port}/callback`,
-        scope: OAUTH_SCOPES,
+        scope: cfg.scopes,
         code_challenge: codeChallenge,
         code_challenge_method: 'S256',
         state,
       });
 
-      const authUrl = `${OAUTH_AUTHORIZE_URL}?${params.toString()}`;
+      const authUrl = `${cfg.authorizeUrl}?${params.toString()}`;
 
       // Open browser
       console.log('  Opening browser to sign in...');
@@ -189,12 +194,13 @@ export async function startAutoOAuthFlow(): Promise<OAuthTokens> {
  * Exchange code using the localhost redirect URI.
  */
 async function exchangeCodeWithRedirect(code: string, codeVerifier: string, state: string, port: number): Promise<OAuthTokens> {
-  const res = await fetch(OAUTH_TOKEN_URL, {
+  const cfg = await getOAuthConfig();
+  const res = await fetch(cfg.tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       grant_type: 'authorization_code',
-      client_id: OAUTH_CLIENT_ID,
+      client_id: cfg.clientId,
       code,
       redirect_uri: `http://localhost:${port}/callback`,
       code_verifier: codeVerifier,
@@ -248,17 +254,18 @@ async function doRefreshTokens(): Promise<OAuthTokens> {
   }
 
   const oauth = creds.claudeAiOauth;
+  const cfg = await getOAuthConfig();
 
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
 
-    const res = await fetch(OAUTH_TOKEN_URL, {
+    const res = await fetch(cfg.tokenUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: oauth.refreshToken,
-        client_id: OAUTH_CLIENT_ID,
+        client_id: cfg.clientId,
       }),
       signal: AbortSignal.timeout(15000),
     });
