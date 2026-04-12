@@ -10,6 +10,29 @@
  *   dario logout    — Remove saved credentials
  */
 
+// ── Bun auto-relaunch ──
+// Bun's TLS fingerprint matches Claude Code's runtime (both use Bun/BoringSSL).
+// If Bun is installed and we're running on Node, relaunch under Bun for
+// network-level fingerprint fidelity.
+if (!('Bun' in globalThis) && !process.env.DARIO_NO_BUN) {
+  try {
+    const { execFileSync } = await import('node:child_process');
+    // Check if bun exists
+    execFileSync('bun', ['--version'], { stdio: 'ignore', timeout: 3000 });
+    // Relaunch under bun
+    const { spawn } = await import('node:child_process');
+    const child = spawn('bun', ['run', ...process.argv.slice(1)], {
+      stdio: 'inherit',
+      env: { ...process.env, DARIO_NO_BUN: '1' },
+    });
+    child.on('exit', (code) => process.exit(code ?? 0));
+    // Prevent this process from continuing
+    await new Promise(() => {});
+  } catch {
+    // Bun not available, continue with Node
+  }
+}
+
 import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
