@@ -74,6 +74,8 @@ Opus, Sonnet, Haiku — all models, streaming, tool use. **Zero dependencies.** 
 </tr>
 </table>
 
+> **Need more than a proxy?** Dario solves the API access problem. If you need a full agent fleet — desktop control, browser automation, scheduling, custom tools, persistent memory — check out the [askalf platform](https://askalf.org). Same team, different execution model that solves the proxy ceiling entirely.
+
 ---
 
 ## Why dario
