@@ -2,6 +2,63 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.2.1] - 2026-04-12
+
+### Fixed
+- **CLI fallback masking 429 errors** — When the API returned 429 and the CLI fallback also failed (e.g. on ARM64 where `claude --print` may not work), dario returned a cryptic 502 instead of the actual rate limit details. Now returns the original 429 with enriched utilization and reset time.
+
+## [3.2.0] - 2026-04-12
+
+### Added
+- **Bun auto-relaunch** — If Bun is installed, dario automatically relaunches under Bun runtime. Bun's TLS fingerprint (BoringSSL, cipher suites, extensions) matches Claude Code's runtime exactly. Node.js had a different TLS fingerprint visible at the network level. Set `DARIO_NO_BUN=1` to disable.
+- **Session ID rotation** — Each request gets a fresh session ID, matching CC `--print` behavior where each invocation creates a new session. A persistent session ID across many rapid requests was a behavioral signal.
+- **Rate governor** — 500ms minimum interval between requests prevents inhuman request cadence. Configurable via `DARIO_MIN_INTERVAL_MS`. CC `--print` takes ~2-3s per invocation — rapid-fire requests don't match any legitimate usage pattern.
+
+## [3.1.1] - 2026-04-12
+
+### Fixed
+- **Unicode encoding in template data** — System prompt and tool descriptions had corrupted em-dashes from Windows encoding. Regenerated from MITM capture with correct UTF-8. Byte-exact match confirmed.
+- **Haiku 400 error** — `context-1m-2025-08-07` beta was sent unconditionally but is only valid for Sonnet 4.6. Now model-conditional.
+
+## [3.1.0] - 2026-04-12
+
+### Changed
+- **Full CC fidelity** — Complete overhaul of template replay. All data now auto-extracted from MITM capture of CC v2.1.104 rather than manually reconstructed.
+- **25 tool definitions** from MITM capture (was 11 hardcoded). Includes CronCreate, CronDelete, CronList, EnterPlanMode, ExitPlanMode, EnterWorktree, ExitWorktree, Monitor, RemoteTrigger, ScheduleWakeup, Skill, TaskOutput, TaskStop, TodoWrite.
+- **CC's 25KB system prompt** injected as base, client prompt appended (was using client prompt only).
+- **Template data** stored as JSON file (`cc-template-data.json`), loaded at runtime for easy updates when CC changes.
+- **User-Agent** removed `workload/cron` (CC doesn't send it for standard requests).
+- **Billing header** removed `cc_workload` (CC only adds it for actual cron jobs).
+
+## [3.0.4] - 2026-04-12
+
+### Fixed
+- **Token refresh spam** — When refresh failed, every subsequent request retried immediately, flooding the console. Added 60s cooldown between retry cycles. Falls back to current token during cooldown.
+- **Silent refresh failures** — Now logs HTTP status and response body on refresh failure.
+
+## [3.0.3] - 2026-04-12
+
+### Changed
+- **MITM-verified beta set** — Reduced from 14 to exact 8 betas CC actually sends at runtime (was sending 6 extras that CC only adds conditionally). Exact order from MITM capture.
+- **Body key order** — Matched to MITM capture: `model, messages, system, tools, metadata, max_tokens, thinking, context_management, output_config, stream`.
+- **Removed `temperature: 1`** — CC doesn't send it for Agent SDK requests.
+
+## [3.0.2] - 2026-04-12
+
+### Changed
+- **Binary RE of CC v2.1.104** — Reverse-engineered latest binary (built 2026-04-12). Found `cc_workload` field, workload tracking in User-Agent, 7 new beta registrations (2 gated/unreleased).
+- **Tool arg translation** — Unmapped tools get arguments translated to match CC tool schemas.
+- **Tool distribution** — Unmapped tools spread across Bash/Read/Grep/Glob/WebSearch/WebFetch instead of all becoming Bash.
+- **tool_result sanitization** — Strips non-standard fields, truncates >30K content.
+- **Framework scrubbing** — Strips framework identifiers from system prompts.
+- **anthropic-version header** — Hardcoded to `2023-06-01` in non-passthrough mode.
+
+## [3.0.1] - 2026-04-12
+
+### Fixed
+- **ESM require crash** — `require('node:child_process')` in `oauth.ts` replaced with `await import()`. Fixes #15.
+- **403 error message** — Now lists supported paths (`POST /v1/messages`, `POST /v1/chat/completions`, `GET /v1/models`). Fixes #16.
+
 ## [3.0.0] - 2026-04-11
 
 ### Changed

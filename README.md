@@ -33,7 +33,7 @@ export ANTHROPIC_BASE_URL=http://localhost:3456   # or OPENAI_BASE_URL=http://lo
 export ANTHROPIC_API_KEY=dario                    # or OPENAI_API_KEY=dario
 ```
 
-Opus, Sonnet, Haiku — all models, streaming, tool use. **Zero dependencies.** ~1,900 lines of TypeScript. Works with Cursor, Continue, Aider, LiteLLM, Hermes, OpenClaw, or any tool that speaks the Anthropic or OpenAI API. When rate limited, `--cli` routes through Claude Code for uninterrupted Opus access.
+Opus, Sonnet, Haiku — all models, streaming, tool use. **Zero dependencies.** ~2,100 lines of TypeScript. Works with Cursor, Continue, Aider, LiteLLM, Hermes, OpenClaw, or any tool that speaks the Anthropic or OpenAI API. When rate limited, `--cli` routes through Claude Code for uninterrupted Opus access. Auto-launches under [Bun](https://bun.sh) when available for TLS fingerprint fidelity.
 
 <table>
 <tr>
@@ -80,7 +80,7 @@ Opus, Sonnet, Haiku — all models, streaming, tool use. **Zero dependencies.** 
 
 Most Claude subscription proxies have a critical billing problem: **Anthropic classifies their requests as third-party and routes all usage to Extra Usage billing** — even when you have Max plan limits available. You're paying for your subscription twice.
 
-dario is the only proxy that solves this. Instead of transforming your requests signal by signal, dario v3.0 uses **template replay** — it replaces the entire request with Claude Code's exact template. CC's tool definitions, CC's field structure, CC's parameters. Only your conversation content is preserved. Anthropic's classifier sees a genuine Claude Code request because it IS one.
+dario is the only proxy that solves this. Instead of transforming your requests signal by signal, dario uses **template replay** — it replaces the entire request with Claude Code's exact template, extracted via MITM capture from CC v2.1.104. 25 tool definitions, 25KB system prompt, exact field order, exact beta headers, exact metadata structure. Only your conversation content is preserved. When Bun is installed, dario auto-relaunches under Bun for TLS fingerprint fidelity matching CC's runtime. Anthropic's classifier sees a genuine Claude Code request because it IS one.
 
 | | dario | Other proxies |
 |---|---|---|
@@ -101,7 +101,7 @@ dario is the only proxy that solves this. Instead of transforming your requests 
 | OpenAI API compat | **Yes** | Yes | Yes |
 | Orchestration sanitization | **Yes** | Yes | No |
 | Token anomaly detection | **Yes** | Yes | No |
-| Codebase size | ~1,900 lines | ~9,000 lines | Platform |
+| Codebase size | ~2,100 lines | ~9,000 lines | Platform |
 | Dependencies | 0 | Many | Many |
 | Setup | 2 commands | Config + build | Config + dashboard |
 
@@ -450,12 +450,17 @@ Your app sends whatever it wants — any tools, any parameters. dario replaces t
 | `--port=PORT` | Port to listen on | `3456` |
 | `--verbose` / `-v` | Log every request | off |
 | `DARIO_API_KEY` | If set, all endpoints (except `/health`) require matching `x-api-key` header or `Authorization: Bearer` header | unset (open) |
+| `DARIO_NO_BUN` | Disable automatic Bun relaunch (stay on Node.js) | unset |
+| `DARIO_MIN_INTERVAL_MS` | Minimum ms between requests (rate governor) | `500` |
 
 ## Supported Features
 
 ### Direct API Mode
 - All Claude models (Opus 4.6, Sonnet 4.6, Haiku 4.5) + 1M extended context aliases (`opus1m`, `sonnet1m`)
-- **Template replay** (v3.0) — replaces the entire request with Claude Code's exact template. CC's tool definitions, field structure, and parameters are sent upstream. Only your conversation content is preserved. Your client's tools are mapped to CC equivalents and reverse-mapped in responses. Tested with 40 third-party tools — all route to `five_hour`. See [Discussion 13](https://github.com/askalf/dario/discussions/13) and [Discussion 14](https://github.com/askalf/dario/discussions/14).
+- **Template replay** (v3.0+) — replaces the entire request with Claude Code's exact template, extracted via MITM capture from CC v2.1.104. 25 tool definitions, 25KB system prompt, exact body key order, exact beta headers (model-conditional), exact metadata structure. Client tools are mapped to CC equivalents and reverse-mapped in responses. Template data stored as JSON for easy updates. See [Discussion 13](https://github.com/askalf/dario/discussions/13) and [Discussion 14](https://github.com/askalf/dario/discussions/14).
+- **Bun auto-relaunch** (v3.2) — auto-detects Bun and relaunches under it for TLS fingerprint fidelity. CC runs on Bun; Node.js has a different TLS fingerprint visible at the network level.
+- **Session ID rotation** (v3.2) — each request gets a fresh session ID, matching CC `--print` behavior.
+- **Rate governor** (v3.2) — 500ms minimum interval between requests prevents inhuman cadence. Configurable via `DARIO_MIN_INTERVAL_MS`.
 - **Enriched 429 errors** — rate limit errors include utilization %, limiting window, and reset time instead of Anthropic's default `"Error"` message
 - **Auto CLI fallback** — if the API returns 429 and Claude Code is installed, transparently retries through `claude --print` with SSE conversion
 - **OpenAI-compatible** (`/v1/chat/completions`) — works with any OpenAI SDK or tool
@@ -535,6 +540,18 @@ Should work if your plan includes Claude Code access. Not tested yet — please 
 **Do I need Claude Code installed?**
 Recommended but not required. If Claude Code is installed and logged in, `dario login` picks up your credentials automatically. Without Claude Code, dario runs its own OAuth flow to authenticate directly. Note: `--cli` mode requires Claude Code (`npm install -g @anthropic-ai/claude-code`).
 
+**First time setup — account priming**
+If dario is the first thing you use with a new Claude account, run a few real Claude Code commands first to establish a session baseline:
+```bash
+claude --print "hello"
+claude --print "hello"
+claude --print "hello"
+```
+This primes the account with legitimate Claude Code sessions. Then start dario normally. Without priming, new accounts may see billing classification issues on first use.
+
+**Do I need Bun installed?**
+Optional but recommended. If [Bun](https://bun.sh) is installed, dario auto-relaunches under it for TLS fingerprint fidelity with Claude Code's runtime. Without Bun, dario runs on Node.js and works fine — the TLS fingerprint is the only difference. Install Bun: `curl -fsSL https://bun.sh/install | bash`
+
 **What happens when my token expires?**
 Dario auto-refreshes tokens 30 minutes before expiry. You should never see an auth error in normal use. If something goes wrong, `dario refresh` forces an immediate refresh.
 
@@ -580,7 +597,7 @@ Dario handles your OAuth tokens. Here's why you can trust it:
 
 | Signal | Status |
 |--------|--------|
-| **Source code** | ~1,900 lines of TypeScript — small enough to audit in one sitting |
+| **Source code** | ~2,100 lines of TypeScript — small enough to audit in one sitting |
 | **Dependencies** | 0 runtime dependencies. Verify: `npm ls --production` |
 | **npm provenance** | Every release is [SLSA attested](https://www.npmjs.com/package/@askalf/dario) via GitHub Actions |
 | **Security scanning** | [CodeQL](https://github.com/askalf/dario/actions/workflows/codeql.yml) runs on every push and weekly |
@@ -612,14 +629,15 @@ cd $(npm root -g)/@askalf/dario && npm ls --production
 
 ## Contributing
 
-PRs welcome. The codebase is ~1,900 lines of TypeScript across 5 files:
+PRs welcome. The codebase is ~2,100 lines of TypeScript across 5 files:
 
 | File | Purpose |
 |------|---------|
-| `src/proxy.ts` | HTTP proxy server + CLI backend |
-| `src/cc-template.ts` | Claude Code request template + tool mapping |
+| `src/proxy.ts` | HTTP proxy server, CLI backend, rate governor |
+| `src/cc-template.ts` | CC template engine + tool mapping |
+| `src/cc-template-data.json` | MITM-extracted CC data (25 tools, 25KB system prompt) |
 | `src/oauth.ts` | Token storage, refresh, credential detection |
-| `src/cli.ts` | CLI entry point |
+| `src/cli.ts` | CLI entry point + Bun auto-relaunch |
 | `src/index.ts` | Library exports |
 
 ```bash

@@ -1,6 +1,6 @@
 # Contributing to dario
 
-PRs welcome. The codebase is ~1100 lines across 4 files.
+PRs welcome. The codebase is ~2,100 lines across 6 files.
 
 ## Setup
 
@@ -15,9 +15,11 @@ npm run dev   # runs with tsx, no build needed
 
 | File | Purpose |
 |------|---------|
-| `src/proxy.ts` | HTTP proxy server, OpenAI compat, CLI backend, auth gate |
-| `src/oauth.ts` | Token storage, refresh, Claude Code credential detection, auto OAuth flow |
-| `src/cli.ts` | CLI entry point |
+| `src/proxy.ts` | HTTP proxy server, OpenAI compat, CLI backend, rate governor |
+| `src/cc-template.ts` | CC template engine + tool mapping |
+| `src/cc-template-data.json` | MITM-extracted CC data (25 tools, 25KB system prompt) |
+| `src/oauth.ts` | Token storage, refresh, credential detection |
+| `src/cli.ts` | CLI entry point + Bun auto-relaunch |
 | `src/index.ts` | Library exports |
 
 ## Before submitting
