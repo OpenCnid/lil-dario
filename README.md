@@ -649,14 +649,14 @@ cd $(npm root -g)/@askalf/dario && npm ls --production
 
 ## Contributing
 
-PRs welcome. The codebase is ~2,000 lines of TypeScript across 6 source files:
+PRs welcome. The codebase is ~2,000 lines of TypeScript across 7 files:
 
 | File | Purpose |
 |------|---------|
 | `src/proxy.ts` | HTTP proxy server, rate governor, billing tag, response forwarding |
-| `src/cc-template.ts` | CC template engine, tool mapping, orchestration sanitization |
-| `src/cc-template-data.json` | MITM-extracted CC data (25 tools, 25KB system prompt) |
-| `src/cc-oauth-detect.ts` | Binary scanner — auto-detect OAuth config from installed CC binary |
+| `src/cc-template.ts` | Template engine, tool mapping, orchestration sanitization |
+| `src/cc-template-data.json` | CC request template data (25 tools, 25KB system prompt) |
+| `src/cc-oauth-detect.ts` | Auto-detect OAuth config from the installed CC binary |
 | `src/oauth.ts` | Token storage, PKCE flow, auto-refresh, credential detection |
 | `src/cli.ts` | CLI entry point, command routing, Bun auto-relaunch |
 | `src/index.ts` | Library exports |
