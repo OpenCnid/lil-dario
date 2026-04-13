@@ -465,6 +465,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
 
     // Proxy to Anthropic (with concurrency control)
     await semaphore.acquire();
+    // Hoisted so the finally block can clean up whatever was set.
+    let upstreamTimeout: ReturnType<typeof setTimeout> | null = null;
+    let onClientClose: (() => void) | null = null;
+    let upstreamAbortReason: 'timeout' | 'client_closed' | null = null;
     try {
       const accessToken = await getAccessToken();
 
@@ -578,11 +582,34 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         'x-stainless-timeout': '600',
       };
 
+      // Client-disconnect abort: if the client drops the connection before
+      // we've finished sending the response, we abort the upstream fetch so
+      // Anthropic stops generating (and billing) a response nobody will
+      // read. Also carries the 5-minute upstream timeout via the same
+      // controller, so a single signal covers both cancellation reasons.
+      const upstreamAbort = new AbortController();
+      upstreamTimeout = setTimeout(() => {
+        if (!upstreamAbort.signal.aborted) {
+          upstreamAbortReason = 'timeout';
+          upstreamAbort.abort();
+        }
+      }, UPSTREAM_TIMEOUT_MS);
+      onClientClose = () => {
+        // 'close' fires on both normal teardown and client disconnect.
+        // We only want to abort if we haven't finished our response yet —
+        // normal teardown happens AFTER res.writableEnded becomes true.
+        if (!res.writableEnded && !upstreamAbort.signal.aborted) {
+          upstreamAbortReason = 'client_closed';
+          upstreamAbort.abort();
+        }
+      };
+      req.on('close', onClientClose);
+
       let upstream = await fetch(targetBase, {
         method: req.method ?? 'POST',
         headers,
         body: finalBody ? new Uint8Array(finalBody) : undefined,
-        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+        signal: upstreamAbort.signal,
       });
 
       // Auto-retry without context-1m if it triggers a long-context billing error.
@@ -606,7 +633,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             method: req.method ?? 'POST',
             headers: retryHeaders,
             body: finalBody ? new Uint8Array(finalBody) : undefined,
-            signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+            signal: upstreamAbort.signal,
           });
           // Use the retry response from here on — peeked body is now stale
           upstream = retry;
@@ -761,11 +788,34 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         if (verbose) console.log(`[dario] #${requestCount} ${upstream.status}`);
       }
     } catch (err) {
-      // Log full error server-side, return generic message to client
-      console.error('[dario] Proxy error:', sanitizeError(err));
-      res.writeHead(502, JSON_HEADERS);
-      res.end(JSON.stringify({ error: 'Proxy error', message: 'Failed to reach upstream API' }));
+      // Differentiate the three failure modes so each gets the right
+      // response (and so we don't spam logs when clients simply drop).
+      if (upstreamAbortReason === 'client_closed') {
+        if (verbose) console.log(`[dario] #${requestCount} aborted (client disconnected)`);
+      } else if (upstreamAbortReason === 'timeout') {
+        console.error(`[dario] #${requestCount} upstream timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s`);
+        if (!res.headersSent) {
+          res.writeHead(504, JSON_HEADERS);
+          res.end(JSON.stringify({ error: 'Upstream timeout', message: `Anthropic did not respond within ${UPSTREAM_TIMEOUT_MS / 1000}s` }));
+        } else if (!res.writableEnded) {
+          res.end();
+        }
+      } else {
+        // Log full error server-side, return generic message to client
+        console.error('[dario] Proxy error:', sanitizeError(err));
+        if (!res.headersSent) {
+          res.writeHead(502, JSON_HEADERS);
+          res.end(JSON.stringify({ error: 'Proxy error', message: 'Failed to reach upstream API' }));
+        } else if (!res.writableEnded) {
+          res.end();
+        }
+      }
     } finally {
+      // Always clean up the upstream-abort plumbing if it was set up. The
+      // setup happens after the body-read phase, so on fast-path errors
+      // (413, body read timeout) these may still be null — guard accordingly.
+      if (upstreamTimeout !== null) clearTimeout(upstreamTimeout);
+      if (onClientClose !== null) req.off('close', onClientClose);
       semaphore.release();
     }
   });
