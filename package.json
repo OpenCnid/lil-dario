@@ -26,7 +26,9 @@
     "start": "node dist/cli.js",
     "dev": "tsx src/cli.ts",
     "e2e": "node test/e2e.mjs",
-    "compat": "node test/compat.mjs"
+    "compat": "node test/compat.mjs",
+    "lint:pkg": "node scripts/check-package-json.mjs",
+    "fix:pkg": "node -e \"const fs=require('fs');fs.writeFileSync('package.json',JSON.stringify(JSON.parse(fs.readFileSync('package.json','utf-8')),null,2)+'\\n')\""
   },
   "keywords": [
     "claude",
