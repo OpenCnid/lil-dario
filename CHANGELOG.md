@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.4.1] - 2026-04-12
+
+### Removed
+- `--cli` / CLI backend mode — Removed. Routing requests through `claude --print` proved unreliable in practice: no tool use support, streaming conversion artifacts, and context handling that diverged from real API behavior in multi-turn conversations. Direct API mode with template replay is the only path that works consistently.
+
 ## [3.4.0] - 2026-04-12
 
 ### Added
