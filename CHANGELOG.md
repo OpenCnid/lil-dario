@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.4.5] - 2026-04-13
+
+### Fixed
+- **Framework identifiers are now scrubbed from message content, not just the system prompt** (follow-up to #23) — `FRAMEWORK_PATTERNS` was previously only applied to `systemText` in `buildCCRequest`, so a framework name like `OpenClaw` or an OC-specific tool-prefix like `sessions_get` inside a user message or `tool_result` block passed through to upstream unchanged. The scrub now covers string message content, `text` blocks, and `tool_result` content in both string and array forms. Logic factored into an exported `scrubFrameworkIdentifiers()` helper.
+- **Broadened fingerprint pattern list** — Added `roo-cline`, `big-agi`, `librechat`, `typingmind`, `claude-bridge`, and the `sessions_*` tool-name prefix (flagged as an OC fingerprint during the #23 diagnostic work). Compound patterns run before single-word ones so compound matches can't be partially eaten by the more general rules.
+- **Additional orchestration tag names** in the proxy-level sanitizer: `agent_persona`, `agent_context`, `tool_context`, `persona`, `tool_call`. These are inline tags some agent frameworks inject into message content that would otherwise survive to upstream.
+
+### Changed
+- **README positioning pass** — Dario is now framed as the *per-request layer* throughout, with session- and account-level concerns routed explicitly to askalf. The "Detection resistance" row is scoped to the per-request level. The askalf section was rewritten from defensive ceiling language to active scope definition — dario and askalf solve different layers, and solving session-level concerns at the per-request layer is a category error. New FAQ entry directly answers "my multi-agent workload got reclassified to overage, why?" by naming the classifier mechanism, crediting the #23 diagnostic work, and routing session-layer shaping to askalf.
+
 ## [3.4.4] - 2026-04-13
 
 ### Fixed
