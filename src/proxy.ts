@@ -14,7 +14,16 @@ const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — generous for large prompts
 const UPSTREAM_TIMEOUT_MS = 300_000; // 5 min — matches Anthropic SDK default
 const BODY_READ_TIMEOUT_MS = 30_000; // 30s — prevents slow-loris on body reads
 const MAX_CONCURRENT = 10; // Max concurrent upstream requests
-const LOCALHOST = '127.0.0.1';
+const DEFAULT_HOST = '127.0.0.1';
+
+// A host is "loopback" if it's one of the well-known localhost literals.
+// Used to decide whether to warn at startup about binding to a reachable
+// interface — binding anywhere else means other machines can reach the
+// proxy and should only be done with DARIO_API_KEY set.
+function isLoopbackHost(host: string): boolean {
+  if (host === '127.0.0.1' || host === '::1' || host === 'localhost') return true;
+  return host.startsWith('127.');
+}
 
 // Simple semaphore for concurrency control
 class Semaphore {
@@ -274,6 +283,7 @@ const OPENAI_MODELS_LIST = { object: 'list', data: ['claude-opus-4-6', 'claude-s
 
 interface ProxyOptions {
   port?: number;
+  host?: string;  // Bind address (default: 127.0.0.1)
   verbose?: boolean;
   model?: string;  // Override model in all requests
   passthrough?: boolean;  // Thin proxy — OAuth swap only, no injection
@@ -321,6 +331,7 @@ function enrich429(body: string, headers: Headers): string {
 
 export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const port = opts.port ?? DEFAULT_PORT;
+  const host = opts.host ?? process.env.DARIO_HOST ?? DEFAULT_HOST;
   const verbose = opts.verbose ?? false;
   const passthrough = opts.passthrough ?? false;
 
@@ -371,7 +382,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   // Optional proxy authentication — pre-encode key buffer for performance
   const apiKey = process.env.DARIO_API_KEY;
   const apiKeyBuf = apiKey ? Buffer.from(apiKey) : null;
-  const corsOrigin = `http://localhost:${port}`;
+  // CORS origin defaults to the localhost URL the proxy is served at. Users
+  // binding to a non-loopback address (e.g. a Tailscale interface) can
+  // override via DARIO_CORS_ORIGIN — otherwise browser-based clients hitting
+  // dario over the mesh will be blocked by their browser's CORS check.
+  const corsOrigin = process.env.DARIO_CORS_ORIGIN || `http://localhost:${port}`;
 
   // Security headers for all responses
   const SECURITY_HEADERS = {
@@ -764,22 +779,38 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     process.exit(1);
   });
 
-  server.listen(port, LOCALHOST, () => {
+  server.listen(port, host, () => {
     const modeLine = passthrough
       ? 'Mode: passthrough (OAuth swap only, no injection)'
       : `OAuth: ${status.status} (expires in ${status.expiresIn})`;
     const modelLine = modelOverride ? `Model: ${modelOverride} (all requests)` : 'Model: passthrough (client decides)';
+    // Display URL uses `localhost` for loopback binds and the literal host
+    // for exposed binds, so the printed URL is the one a client would
+    // actually use to reach the proxy.
+    const displayHost = isLoopbackHost(host) ? 'localhost' : host;
     console.log('');
-    console.log(`  dario — http://localhost:${port}`);
+    console.log(`  dario — http://${displayHost}:${port}`);
     console.log('');
     console.log('  Your Claude subscription is now an API.');
     console.log('');
     console.log('  Usage:');
-    console.log(`    ANTHROPIC_BASE_URL=http://localhost:${port}`);
+    console.log(`    ANTHROPIC_BASE_URL=http://${displayHost}:${port}`);
     console.log('    ANTHROPIC_API_KEY=dario');
     console.log('');
     console.log(`  ${modeLine}`);
     console.log(`  ${modelLine}`);
+    if (!isLoopbackHost(host)) {
+      console.log('');
+      console.log(`  ⚠  Bound to ${host} — reachable from other machines on the network.`);
+      if (!apiKey) {
+        console.log('     DARIO_API_KEY is not set. Any host that can reach this port can');
+        console.log('     proxy requests through your OAuth subscription. Set DARIO_API_KEY');
+        console.log('     before exposing dario beyond loopback.');
+      } else {
+        console.log('     DARIO_API_KEY is set — clients must send x-api-key or Authorization');
+        console.log('     to be accepted.');
+      }
+    }
     console.log('');
   });
 

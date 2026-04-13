@@ -132,13 +132,23 @@ async function proxy() {
     console.error('[dario] Invalid port. Must be 1-65535.');
     process.exit(1);
   }
+  // Bind address — accepts --host=<addr>; falls through to DARIO_HOST env
+  // var or the default of 127.0.0.1 inside startProxy. The sanity check
+  // here only rejects obviously bad shapes; real address validation
+  // happens when the OS tries to bind.
+  const hostArg = args.find(a => a.startsWith('--host='));
+  const host = hostArg ? hostArg.split('=')[1] : undefined;
+  if (host !== undefined && !/^[a-zA-Z0-9._:-]+$/.test(host)) {
+    console.error('[dario] Invalid --host. Must be an IP address or hostname.');
+    process.exit(1);
+  }
   const verbose = args.includes('--verbose') || args.includes('-v');
   const passthrough = args.includes('--passthrough') || args.includes('--thin');
   const preserveTools = args.includes('--preserve-tools') || args.includes('--keep-tools');
   const modelArg = args.find(a => a.startsWith('--model='));
   const model = modelArg ? modelArg.split('=')[1] : undefined;
 
-  await startProxy({ port, verbose, model, passthrough, preserveTools });
+  await startProxy({ port, host, verbose, model, passthrough, preserveTools });
 }
 
 async function help() {
@@ -160,6 +170,12 @@ async function help() {
     --passthrough, --thin    Thin proxy — OAuth swap only, no injection
     --preserve-tools         Keep client tool schemas (for agents with custom tools)
     --port=PORT              Port to listen on (default: 3456)
+    --host=ADDRESS           Address to bind to (default: 127.0.0.1)
+                             Use 0.0.0.0 to accept connections from other machines.
+                             Alternatively set DARIO_HOST env var.
+                             When binding non-loopback, also set DARIO_API_KEY
+                             so unauthenticated LAN hosts can't proxy through
+                             your OAuth subscription.
     --verbose, -v            Log all requests
 
   Quick start:
