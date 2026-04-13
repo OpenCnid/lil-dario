@@ -5,20 +5,32 @@
  * (client_id, authorize URL, token URL, scopes). Eliminates the need to
  * hardcode values that Anthropic rotates between CC releases.
  *
- * CC ships two OAuth client configurations in one binary:
+ * CC ships three OAuth config factories in one binary (dev/staging/prod),
+ * selected at runtime by an environment switch that is hardcoded to "prod"
+ * in shipped builds. Only the PROD block is live; "local" and "staging"
+ * are dead code paths.
  *
- *   1. LOCAL flow — used when the OAuth client owns the callback
- *      (i.e. runs an HTTP server on localhost). This is what dario does.
- *      Identified by OAUTH_FILE_SUFFIX:"-local-oauth" next to the CLIENT_ID.
+ *   PROD block (the one we want):
+ *     BASE_API_URL: "https://api.anthropic.com"
+ *     CLAUDE_AI_AUTHORIZE_URL: "https://claude.com/cai/oauth/authorize"
+ *     TOKEN_URL: "https://platform.claude.com/v1/oauth/token"
+ *     CLIENT_ID: "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+ *     OAUTH_FILE_SUFFIX: ""
  *
- *   2. PLATFORM flow — used when the callback is hosted at
- *      platform.claude.com/oauth/code/callback. Different CLIENT_ID.
- *      Not applicable to dario.
+ *   LOCAL block (dead code in shipped builds — CC pointing at localhost:8000
+ *     etc. as its own dev stack, NOT about "client uses a localhost callback"):
+ *     BASE_API_URL: "http://localhost:8000"
+ *     CLIENT_ID: "22422756-60c9-4084-8eb7-27705fd5cf9a"
+ *     OAUTH_FILE_SUFFIX: "-local-oauth"
  *
- * We scan for the LOCAL block and extract its config.
+ * Dario uses CC's own automatic OAuth flow — the prod client is registered
+ * with `http://localhost:${port}/callback` exactly as dario sends. (The
+ * "MANUAL_REDIRECT_URL" on platform.claude.com is only used when dario's
+ * local HTTP server can't bind a port; dario never hits that path.)
  *
- * Results are cached per-binary-hash at ~/.dario/cc-oauth-cache.json so
- * startup only re-scans when the user upgrades Claude Code.
+ * Results are cached per-binary-hash at ~/.dario/cc-oauth-cache-v2.json so
+ * startup only re-scans when the user upgrades Claude Code. The -v2 suffix
+ * invalidates the v3.4.0-v3.4.2 caches that held the wrong (dev) client_id.
  */
 
 import { readFile, writeFile, mkdir, stat, open as openFile } from 'node:fs/promises';
@@ -38,16 +50,19 @@ export interface DetectedOAuthConfig {
 }
 
 // Last-resort fallback if CC binary can't be found or scanned.
-// These values are the known-good v2.1.104 local-oauth flow.
+// These values are the CC v2.1.104 PROD OAuth config, extracted from
+// the `nh$` object in the shipped binary.
 const FALLBACK: DetectedOAuthConfig = {
-  clientId: '22422756-60c9-4084-8eb7-27705fd5cf9a',
+  clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
   authorizeUrl: 'https://claude.com/cai/oauth/authorize',
   tokenUrl: 'https://platform.claude.com/v1/oauth/token',
-  scopes: 'user:profile user:inference user:sessions:claude_code user:mcp_servers',
+  scopes: 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload',
   source: 'fallback',
 };
 
-const CACHE_PATH = join(homedir(), '.dario', 'cc-oauth-cache.json');
+// -v2 suffix invalidates the v3.4.0-v3.4.2 cache that pinned the wrong
+// (dev) client_id extracted from the dead-code -local-oauth block.
+const CACHE_PATH = join(homedir(), '.dario', 'cc-oauth-cache-v2.json');
 
 function candidatePaths(): string[] {
   const home = homedir();
@@ -102,73 +117,48 @@ async function fingerprintBinary(path: string): Promise<string> {
 }
 
 /**
- * Scan binary bytes for the LOCAL-oauth OAuth block.
- * Uses Buffer.indexOf to locate anchor strings, then slices a small
- * window of context to run regexes on. This avoids converting the
- * whole binary to a JS string.
+ * Scan binary bytes for the PROD OAuth config block.
+ *
+ * Anchors on `BASE_API_URL:"https://api.anthropic.com"` — this literal
+ * only appears inside the prod config object (`nh$`). The LOCAL-dev block
+ * uses `http://localhost:8000` for the same key, and there's no staging
+ * block present in shipped builds. Once we find the anchor, the CLIENT_ID,
+ * CLAUDE_AI_AUTHORIZE_URL, TOKEN_URL, and scopes all live within a ~1.5KB
+ * window after it.
  */
 export function scanBinaryForOAuthConfig(buf: Buffer): Omit<DetectedOAuthConfig, 'source' | 'ccPath' | 'ccHash'> | null {
-  // Anchor: `OAUTH_FILE_SUFFIX:"-local-oauth"` — this is the config-block
-  // occurrence, not the switch-case string literal. The switch-case produces
-  // just `-local-oauth` bytes, but the config object serializes as
-  // `OAUTH_FILE_SUFFIX:"-local-oauth"` with the key+quote prefix, which is
-  // stable across minified CC builds.
-  const anchor = Buffer.from('OAUTH_FILE_SUFFIX:"-local-oauth"');
-  let anchorIdx = buf.indexOf(anchor);
-
-  // Fallback anchor — some builds may tokenize differently.
-  if (anchorIdx === -1) {
-    const looseAnchor = Buffer.from('"-local-oauth"');
-    anchorIdx = buf.indexOf(looseAnchor);
-  }
+  const anchor = Buffer.from('BASE_API_URL:"https://api.anthropic.com"');
+  const anchorIdx = buf.indexOf(anchor);
   if (anchorIdx === -1) return null;
 
-  // The CLIENT_ID sits within a few hundred bytes BEFORE the anchor
-  // (in the same config object). Extract a window around it.
-  const windowStart = Math.max(0, anchorIdx - 1024);
-  const windowEnd = Math.min(buf.length, anchorIdx + 64);
-  const localBlock = buf.slice(windowStart, windowEnd).toString('latin1');
+  // The prod config object is laid out roughly as one line of minified JS.
+  // Take a generous window to be safe across minifier differences.
+  const windowStart = anchorIdx;
+  const windowEnd = Math.min(buf.length, anchorIdx + 2048);
+  const prodBlock = buf.slice(windowStart, windowEnd).toString('latin1');
 
-  // Pick the CLIENT_ID that's CLOSEST to the anchor (last occurrence in window).
-  const cidRegex = /CLIENT_ID\s*:\s*"([0-9a-f-]{36})"/gi;
-  let lastCid: string | null = null;
-  let m: RegExpExecArray | null;
-  while ((m = cidRegex.exec(localBlock)) !== null) {
-    if (m[1]) lastCid = m[1];
-  }
-  if (!lastCid) return null;
-  const clientId = lastCid;
+  const cidMatch = /CLIENT_ID\s*:\s*"([0-9a-f-]{36})"/i.exec(prodBlock);
+  if (!cidMatch || !cidMatch[1]) return null;
+  const clientId = cidMatch[1];
 
-  // Authorize URL: CLAUDE_AI_AUTHORIZE_URL appears once in the binary.
-  const authAnchor = Buffer.from('CLAUDE_AI_AUTHORIZE_URL');
-  const authIdx = buf.indexOf(authAnchor);
+  // Defensive: if we somehow matched the dev client_id, reject — the
+  // anchor should have put us in the prod block, but this guards against
+  // the block being laid out in an unexpected order across builds.
+  if (clientId === '22422756-60c9-4084-8eb7-27705fd5cf9a') return null;
+
   let authorizeUrl = FALLBACK.authorizeUrl;
-  if (authIdx !== -1) {
-    const w = buf.slice(authIdx, Math.min(buf.length, authIdx + 256)).toString('latin1');
-    const m = /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"([^"]+)"/.exec(w);
-    if (m && m[1]) authorizeUrl = m[1];
-  }
+  const authMatch = /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"([^"]+)"/.exec(prodBlock);
+  if (authMatch && authMatch[1]) authorizeUrl = authMatch[1];
 
-  // Token URL: TOKEN_URL — look for the one under platform.claude.com/.../oauth/token
-  const tokenAnchor = Buffer.from('TOKEN_URL');
-  let searchFrom = 0;
   let tokenUrl = FALLBACK.tokenUrl;
-  while (searchFrom < buf.length) {
-    const idx = buf.indexOf(tokenAnchor, searchFrom);
-    if (idx === -1) break;
-    const w = buf.slice(idx, Math.min(buf.length, idx + 128)).toString('latin1');
-    const m = /TOKEN_URL\s*:\s*"(https:\/\/[^"]*\/oauth\/token[^"]*)"/.exec(w);
-    if (m && m[1]) {
-      tokenUrl = m[1];
-      break;
-    }
-    searchFrom = idx + tokenAnchor.length;
-  }
+  const tokenMatch = /TOKEN_URL\s*:\s*"(https:\/\/[^"]*\/oauth\/token[^"]*)"/.exec(prodBlock);
+  if (tokenMatch && tokenMatch[1]) tokenUrl = tokenMatch[1];
 
-  // Scopes: contiguous quoted string of "user:X user:Y user:Z ..."
-  // Search for an anchor like "user:profile " which is the first scope.
-  const scopeAnchor = Buffer.from('"user:profile ');
+  // Scopes live in a separate array-of-strings block elsewhere in the
+  // binary, not inside the prod config object itself. Search globally
+  // for the first quoted `user:profile ...` run.
   let scopes = FALLBACK.scopes;
+  const scopeAnchor = Buffer.from('"user:profile ');
   const scopeIdx = buf.indexOf(scopeAnchor);
   if (scopeIdx !== -1) {
     const w = buf.slice(scopeIdx, Math.min(buf.length, scopeIdx + 512)).toString('latin1');

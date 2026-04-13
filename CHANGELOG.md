@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.4.3] - 2026-04-13
+
+### Fixed
+- **Critical: OAuth login failures on v3.3.0-v3.4.2** — `dario login` and `dario refresh` have been failing with `Invalid client id provided` / `Client with id [uuid] not found` for a growing number of users over the last 24-48 hours. Root cause: the `cc-oauth-detect.ts` scanner introduced in v3.4.0 anchored on `OAUTH_FILE_SUFFIX:"-local-oauth"` to find the OAuth config inside the installed CC binary, and extracted `CLIENT_ID: 22422756-60c9-4084-8eb7-27705fd5cf9a`. That block turns out to be **dead code** in shipped CC builds — it's the config CC uses when targeting Anthropic's internal localhost dev stack (`http://localhost:8000`/`4000`/`3000` as API hosts), selected only when an internal environment switch returns `"local"`. Shipped CC binaries hardcode that switch to `"prod"` and use the `nh$` config instead, which carries `CLIENT_ID: 9d1c250a-e61b-44d9-88ed-5944d1962f5e`. The scanner was extracting a client_id that CC itself never uses at runtime. Anthropic's authorize endpoint had previously been lenient enough to accept the dev client_id in addition to the prod one; recent tightening on their side started rejecting it, which is why this surfaced as a cliff failure. Credit to @belangertrading who identified the correct client_id in #12 — the earlier rebuttal was mistaken on both directions (switching to `9d1c250a-` does *not* cause `invalid_redirect_uri`; the prod client is registered with `http://localhost:${port}/callback` exactly as dario sends).
+- **Scanner re-anchored on `BASE_API_URL:"https://api.anthropic.com"`** — This literal only appears inside the prod config block, so the scanner now reliably lands inside the right object regardless of how the minifier reorders fields across CC releases. Defensive check rejects a scan result if it matches the known-dead dev UUID.
+- **Cache file renamed to `~/.dario/cc-oauth-cache-v2.json`** — Invalidates v3.4.0-v3.4.2 caches that pinned the wrong client_id. On first run after upgrade, dario re-scans the installed CC binary and writes the correct value. No manual cache clearing required.
+- **Fallback values updated to CC 2.1.104 prod config** — Clients running dario without CC installed locally now fall back to the same values real CC uses, not the dead-code dev values.
+
+### Related
+- Likely also resolves #18 (Wysie), #22 (trinhnvgem, iNicholasBE) — same symptom, same root cause.
+- Partially resolves #26 — the `credentials.json` missing-`clientId` regression becomes a non-issue once the refresh path reads the correct client_id from the detector rather than expecting it in `credentials.json`.
+
 ## [3.4.2] - 2026-04-13
 
 ### Added
