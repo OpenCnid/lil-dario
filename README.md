@@ -31,7 +31,9 @@ Install it once, log in once (using your existing Claude Code credentials if you
 
 **Single-account mode is the default.** You don't need an account anywhere, you don't need to wait for anything, and nothing phones home. Install and run.
 
-**Pool mode** (new in v3.5.0) lifts multi-account routing into dario itself. Add two or more Claude subscriptions with `dario accounts add`, and dario starts selecting per request by the account with the most headroom, marking exhausted accounts rejected until they reset. No hosted platform required — you run the pool on your machine, against your own subscriptions. See [Multi-Account Pool Mode](#multi-account-pool-mode) below for the details.
+**Pool mode** (new in v3.5.0) lifts multi-account routing into dario itself. Add two or more Claude subscriptions with `dario accounts add`, and dario starts selecting per request by the account with the most headroom, marking exhausted accounts rejected until they reset. No hosted platform required — you run the pool on your machine, against your own subscriptions. See [Multi-Account Pool Mode](#multi-account-pool-mode) below.
+
+**Multi-provider routing** (new in v3.6.0) lets dario speak to more than just Claude. Configure an OpenAI-compat backend (OpenAI, OpenRouter, Groq, local LiteLLM, Ollama's openai-compat mode) with `dario backend add openai --key=... [--base-url=...]`, and GPT-family model names at `/v1/chat/completions` route to that backend while Claude model names keep flowing through the Claude subscription path. Point your tool at `http://localhost:3456` once and use any model from any provider. See [Multi-Provider Routing](#multi-provider-routing) below.
 
 Separately, [askalf](https://askalf.org) is the hosted platform that does the things a local proxy on your machine can't — browser and desktop control, scheduling, persistent memory, 24/7 hosted fleets. Different problem, different tool. Dario does not depend on askalf, and askalf is not required to use any dario feature.
 
@@ -78,6 +80,8 @@ No separate API key. No Extra Usage charges. No rebuilding your workflow around 
 **Use dario if** you already pay for Claude Max or Pro and you want Claude inside the tools you already use, without paying API rates for every request or routing your work through a second hosted stack.
 
 **Use dario pool mode if** you're running multi-agent workloads and hitting per-subscription rate limits — add 2–N accounts with `dario accounts add` and dario handles headroom-aware routing across them, all on your machine, against your own subscriptions. No hosted stack to sign up for. See [Multi-Account Pool Mode](#multi-account-pool-mode).
+
+**Use dario multi-provider routing if** you want one local endpoint that speaks to Claude subscriptions *and* OpenAI / OpenRouter / Groq / a local LiteLLM / anything else OpenAI-compat. `dario backend add openai --key=...`, point your tool at `http://localhost:3456`, and every model from every provider flows through the same URL. See [Multi-Provider Routing](#multi-provider-routing).
 
 **Use the Anthropic API directly if** you need platform-native primitives, vendor-managed production usage, high-scale control, or SLAs your subscription tier doesn't cover. Dario isn't trying to replace the API — it's trying to unlock the subscription you already bought.
 
@@ -203,6 +207,51 @@ Pool mode v3.5.0 ships **headroom-aware selection across requests**. It does not
 
 ---
 
+## Multi-Provider Routing
+
+*New in v3.6.0.* Dario is no longer Claude-only. Configure an OpenAI-compat backend once, and GPT-family model names at `/v1/chat/completions` route to that backend while Claude model names keep flowing through the Claude subscription path. Works with **any** OpenAI-compat provider — OpenAI, OpenRouter, Groq, a local LiteLLM instance, Ollama's openai-compat mode, whatever — via a configurable `--base-url`.
+
+```bash
+# OpenAI itself (default base URL)
+dario backend add openai --key=sk-proj-...
+
+# Groq
+dario backend add groq --key=gsk_... --base-url=https://api.groq.com/openai/v1
+
+# OpenRouter
+dario backend add openrouter --key=sk-or-... --base-url=https://openrouter.ai/api/v1
+
+# Local LiteLLM / Ollama / any openai-compat server
+dario backend add local --key=anything --base-url=http://127.0.0.1:4000/v1
+
+# Inspect
+dario backend list
+```
+
+### How it routes
+
+After the proxy starts, every request at `/v1/chat/completions` is checked:
+
+| Request model | Route |
+|---|---|
+| `gpt-*`, `o1-*`, `o3-*`, `o4-*`, `chatgpt-*`, `text-davinci-*`, `text-embedding-*` | OpenAI-compat backend (if configured) |
+| `claude-*` (or the shortcut `opus`/`sonnet`/`haiku`) | Claude subscription path |
+| Anything else on `/v1/chat/completions` | Claude subscription path with existing OpenAI-compat translation |
+
+Point any tool that speaks the OpenAI Chat Completions API at `http://localhost:3456/v1` once, and both GPT and Claude models work through the same base URL. Cursor, Continue, Aider, any OpenAI SDK — they don't need to know anything changed.
+
+### Why this matters
+
+Dario's earlier layers (template replay, framework scrubbing, pool routing) keep the Claude subscription path defensible against Anthropic's classifier. Multi-provider routing changes the *game board*: when dario also speaks OpenAI and OpenAI-compat, a squeeze on the Claude side stops being an existential issue — traffic for affected workloads shifts to another backend, and dario is still useful. The moment Anthropic ships their own "bring your subscription to the API" feature, dario's Claude backend simplifies and keeps working. Either way, dario is still the local router between every model and every tool on your machine.
+
+### Not yet in this release
+
+- **Cross-format translation** (Anthropic → OpenAI). Requests at `/v1/messages` with GPT-family model names fall through to the existing Claude-side handling (which maps them to Claude equivalents). Full Anthropic → OpenAI request translation, including tool_use format conversion, lands in a follow-up.
+- **Per-model routing rules.** v3.6.0 supports one active openai-compat backend. Per-model selection (`llama-*` → Groq, `mixtral-*` → OpenRouter) ships next.
+- **Fallback rules.** "If Claude 429s, use Gemini" is a follow-up goal. v3.6.0 ships the routing plumbing; fallback logic layers on top.
+
+---
+
 ## Dario and askalf
 
 Dario is fully useful on its own — single-account mode is the default, pool mode (above) scales to as many Claude subscriptions as you want to add, and neither mode requires an account anywhere. Everything dario does is open-source and self-hosted.
@@ -238,6 +287,9 @@ Pool mode in dario covers the "I want multi-account routing on my own machine wi
 | `dario accounts list` | List accounts in the multi-account pool |
 | `dario accounts add <alias>` | Add a new account to the pool (runs OAuth flow) |
 | `dario accounts remove <alias>` | Remove an account from the pool |
+| `dario backend list` | List configured OpenAI-compat backends |
+| `dario backend add <name> --key=<k> [--base-url=<u>]` | Add an OpenAI-compat backend |
+| `dario backend remove <name>` | Remove an OpenAI-compat backend |
 | `dario help` | Full command reference |
 
 ### Proxy options

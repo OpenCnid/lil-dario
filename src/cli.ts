@@ -39,6 +39,7 @@ import { homedir } from 'node:os';
 import { startAutoOAuthFlow, getStatus, refreshTokens, loadCredentials } from './oauth.js';
 import { startProxy, sanitizeError } from './proxy.js';
 import { listAccountAliases, loadAllAccounts, addAccountViaOAuth, removeAccount } from './accounts.js';
+import { listBackends, saveBackend, removeBackend, type BackendCredentials } from './openai-backend.js';
 
 const args = process.argv.slice(2);
 const command = args[0] ?? 'proxy';
@@ -263,6 +264,104 @@ async function accounts() {
   process.exit(1);
 }
 
+async function backend() {
+  const sub = args[1];
+
+  if (!sub || sub === 'list') {
+    const all = await listBackends();
+    console.log('');
+    console.log('  dario — Backends');
+    console.log('  ────────────────');
+    console.log('');
+    if (all.length === 0) {
+      console.log('  No secondary backends configured.');
+      console.log('');
+      console.log('  Dario\'s Claude subscription path runs unchanged. To add an');
+      console.log('  OpenAI-compat backend (OpenAI, OpenRouter, Groq, local LiteLLM,');
+      console.log('  etc.), run:');
+      console.log('    dario backend add openai --key=sk-...');
+      console.log('    dario backend add openai --key=sk-... --base-url=https://api.groq.com/openai/v1');
+      console.log('');
+      return;
+    }
+    console.log(`  ${all.length} backend${all.length === 1 ? '' : 's'} configured`);
+    console.log('');
+    for (const b of all) {
+      const redacted = b.apiKey.length > 8
+        ? `${b.apiKey.slice(0, 3)}...${b.apiKey.slice(-4)}`
+        : '***';
+      console.log(`    ${b.name.padEnd(16)} ${b.provider.padEnd(10)} ${b.baseUrl.padEnd(40)} ${redacted}`);
+    }
+    console.log('');
+    return;
+  }
+
+  if (sub === 'add') {
+    const name = args[2];
+    if (!name || name.startsWith('--')) {
+      console.error('');
+      console.error('  Usage: dario backend add <name> --key=<api-key> [--base-url=<url>]');
+      console.error('');
+      console.error('  Examples:');
+      console.error('    dario backend add openai --key=sk-proj-...');
+      console.error('    dario backend add groq   --key=gsk_... --base-url=https://api.groq.com/openai/v1');
+      console.error('    dario backend add openrouter --key=sk-or-... --base-url=https://openrouter.ai/api/v1');
+      console.error('');
+      process.exit(1);
+    }
+    if (!/^[a-zA-Z0-9._-]+$/.test(name)) {
+      console.error('[dario] Invalid backend name. Use letters, numbers, dot, underscore, dash only.');
+      process.exit(1);
+    }
+
+    const keyArg = args.find(a => a.startsWith('--key='));
+    const baseUrlArg = args.find(a => a.startsWith('--base-url='));
+    const apiKey = keyArg ? keyArg.split('=').slice(1).join('=') : '';
+    const baseUrl = baseUrlArg ? baseUrlArg.split('=').slice(1).join('=') : 'https://api.openai.com/v1';
+
+    if (!apiKey) {
+      console.error('[dario] --key=<api-key> is required.');
+      process.exit(1);
+    }
+
+    const creds: BackendCredentials = {
+      provider: 'openai',  // v3.6.0: only openai-compat backends are supported
+      name,
+      apiKey,
+      baseUrl,
+    };
+
+    await saveBackend(creds);
+    console.log('');
+    console.log(`  Backend "${name}" added (openai-compat, ${baseUrl}).`);
+    console.log('  Restart \`dario proxy\` to pick up the new routing.');
+    console.log('');
+    return;
+  }
+
+  if (sub === 'remove' || sub === 'rm') {
+    const name = args[2];
+    if (!name) {
+      console.error('');
+      console.error('  Usage: dario backend remove <name>');
+      console.error('');
+      process.exit(1);
+    }
+    const ok = await removeBackend(name);
+    if (ok) {
+      console.log(`[dario] Backend "${name}" removed.`);
+    } else {
+      console.error(`[dario] No backend "${name}" found.`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  console.error(`[dario] Unknown backend subcommand: ${sub}`);
+  console.error('Usage: dario backend [list|add <name> --key=...|remove <name>]');
+  process.exit(1);
+}
+
 async function help() {
   console.log(`
   dario — Use your Claude subscription as an API.
@@ -276,6 +375,10 @@ async function help() {
     dario accounts list      List accounts in the multi-account pool
     dario accounts add NAME  Add a new account to the pool (runs OAuth flow)
     dario accounts remove N  Remove an account from the pool
+    dario backend list       List configured OpenAI-compat backends
+    dario backend add NAME --key=sk-... [--base-url=...]
+                             Add an OpenAI-compat backend (OpenAI, OpenRouter, Groq, etc.)
+    dario backend remove N   Remove an OpenAI-compat backend
 
   Proxy options:
     --model=MODEL            Force a model for all requests
@@ -332,6 +435,7 @@ const commands: Record<string, () => Promise<void>> = {
   refresh,
   logout,
   accounts,
+  backend,
   help,
   version,
   '--help': help,

@@ -27,3 +27,16 @@ export {
 export type { AccountCredentials } from './accounts.js';
 export { Analytics } from './analytics.js';
 export type { RequestRecord, AnalyticsSummary } from './analytics.js';
+
+// Multi-provider backends (v3.6.0+). Secondary OpenAI-compat providers
+// (OpenAI, OpenRouter, Groq, local LiteLLM, etc.) configured via
+// `dario backend add`. The Claude subscription path is unchanged — these
+// are additional routes for non-Claude models.
+export {
+  listBackends,
+  saveBackend,
+  removeBackend,
+  getOpenAIBackend,
+  isOpenAIModel,
+} from './openai-backend.js';
+export type { BackendCredentials } from './openai-backend.js';

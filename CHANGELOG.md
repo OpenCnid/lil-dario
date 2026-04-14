@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.6.0] - 2026-04-13
+
+Multi-provider routing. Dario stops being Claude-only.
+
+### Added
+- **Secondary OpenAI-compat backend.** `dario backend add openai --key=sk-...` configures an OpenAI-compat endpoint that dario routes GPT-family model requests to. Works with any OpenAI-compatible provider — OpenAI, OpenRouter, Groq, a local LiteLLM, Ollama's OpenAI-compat mode — via `--base-url=https://your-provider/v1`. Credentials stored at `~/.dario/backends/<name>.json` with mode 0600. Multiple backends can be listed and removed independently.
+- **`dario backend` CLI.** `dario backend list`, `dario backend add <name> --key=<api-key> [--base-url=<url>]`, `dario backend remove <name>`.
+- **Routing branch in the proxy.** When an OpenAI-compat backend is configured and a request arrives at `/v1/chat/completions` with a GPT-family model name (`gpt-*`, `o1-*`, `o3-*`, `o4-*`, `chatgpt-*`, `text-davinci-*`, `text-embedding-*`), dario forwards the request as-is to the backend's `baseUrl`, swaps the Authorization header to the configured API key, and streams the response back. No template replay, no identity injection, no Claude-side processing — the client is already speaking OpenAI format, the backend is OpenAI-compat, dario is just the local router.
+- **Programmatic API:** `listBackends`, `saveBackend`, `removeBackend`, `getOpenAIBackend`, `isOpenAIModel`, and `BackendCredentials` exported from `@askalf/dario` for library users.
+
+### Why
+Per-request template replay, framework scrubbing, and multi-account pool routing all reduce dario's exposure to Anthropic's classifier, but they keep dario in a 1:1 game with one vendor — every move Anthropic makes requires a counter-move in dario. Adding a second provider changes the game board: when dario speaks to Claude *and* OpenAI (and any OpenAI-compat endpoint — OpenRouter, Groq, self-hosted LiteLLM, local Ollama), the value proposition stops being "beat the Claude classifier" and starts being "the local router between any LLM and any tool on your machine." If Anthropic tightens a knob, traffic for affected workloads shifts to another backend. If they ship their own subscription-via-API, the Claude backend simplifies and keeps working. Dario wins either way.
+
+This release is the smallest clean slice of that architecture: one secondary backend, one routing branch, zero change to the existing Claude path.
+
+### Not in this release
+- **Cross-format translation.** Requests at `/v1/messages` (Anthropic format) with GPT-family model names fall through to the existing Claude-side handling (where they map to Claude equivalents). Anthropic→OpenAI request translation, including tool_use format conversion, lands in a follow-up.
+- **Multiple simultaneous openai-compat backends.** Only the first configured backend is active for routing. Per-model backend selection (`gpt-*` → OpenAI, `llama-*` → Groq, `mixtral-*` → OpenRouter) is a follow-up release.
+- **Fallback rules.** "If Claude 429s, use Gemini" is a v3.7.0+ goal. v3.6.0 ships the routing plumbing; fallback logic ships on top of it.
+
+No behavior change for Claude-only users. Pool mode and everything else from v3.5.0 keeps working unchanged. Secondary backends are additive.
+
 ## [3.5.0] - 2026-04-13
 
 Multi-account pool mode — the first new user-visible capability since template replay.

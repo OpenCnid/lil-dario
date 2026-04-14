@@ -10,6 +10,7 @@ import { buildCCRequest, reverseMapResponse } from './cc-template.js';
 import { AccountPool, parseRateLimits, type PoolAccount } from './pool.js';
 import { Analytics } from './analytics.js';
 import { loadAllAccounts, loadAccount, refreshAccountToken } from './accounts.js';
+import { getOpenAIBackend, isOpenAIModel, forwardToOpenAI, type BackendCredentials } from './openai-backend.js';
 
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const DEFAULT_PORT = 3456;
@@ -339,6 +340,17 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const verbose = opts.verbose ?? false;
   const passthrough = opts.passthrough ?? false;
 
+  // Multi-provider backends (v3.6.0+). Loaded once at startup; the CLI
+  // `dario backend add openai --key=…` writes to ~/.dario/backends/.
+  // Routing: a GPT-family model arriving on /v1/chat/completions is
+  // dispatched to the openai-compat backend when one is configured,
+  // otherwise it falls through to the existing Claude-side handling
+  // (which used to map gpt-* names to Claude equivalents).
+  let openaiBackend: BackendCredentials | null = await getOpenAIBackend();
+  if (openaiBackend) {
+    console.log(`  OpenAI-compat backend: ${openaiBackend.name} → ${openaiBackend.baseUrl}`);
+  }
+
   // Multi-account pool — activated when ~/.dario/accounts/ has 2+ entries.
   // Single-account dario keeps its existing code path unchanged.
   const accountsList = await loadAllAccounts();
@@ -594,6 +606,30 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         clearTimeout(bodyTimeout);
       }
       const body = Buffer.concat(chunks);
+
+      // Multi-provider routing (v3.6.0+). When an OpenAI-compat backend is
+      // configured and the request is on /v1/chat/completions with a
+      // GPT-family model, forward it straight through to the backend
+      // instead of running it through the Claude template path. Requests
+      // on /v1/messages or with Claude-family models fall through to
+      // existing behavior.
+      if (openaiBackend && isOpenAI && body.length > 0) {
+        try {
+          const peek = JSON.parse(body.toString()) as { model?: string };
+          const rawModel = (peek.model || '').toString();
+          if (rawModel && isOpenAIModel(rawModel)) {
+            if (verbose) {
+              console.log(`[dario] #${requestCount} ${req.method} ${urlPath} (model: ${rawModel}) → openai backend`);
+            }
+            requestCount++;
+            await forwardToOpenAI(
+              req, res, body, openaiBackend, corsOrigin, SECURITY_HEADERS,
+              UPSTREAM_TIMEOUT_MS, verbose,
+            );
+            return;
+          }
+        } catch { /* not JSON — fall through to existing path */ }
+      }
 
       // Parse body once, apply OpenAI translation, model override, and sanitization
       let finalBody: Buffer | undefined = body.length > 0 ? body : undefined;
