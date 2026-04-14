@@ -4,6 +4,7 @@
 
 ## Checklist
 - [ ] `npm run build` passes
-- [ ] Tested with `dario proxy --verbose`
-- [ ] No new dependencies added
+- [ ] `npm test` passes (offline regression test, no credentials required)
+- [ ] For changes that touch `proxy.ts`, `cc-template.ts`, or streaming behavior: tested with `dario proxy --verbose` + `node test/compat.mjs` (requires credentials)
+- [ ] No new runtime dependencies added
 - [ ] No tokens/secrets in code or logs
