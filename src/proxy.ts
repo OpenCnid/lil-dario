@@ -749,24 +749,37 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       };
       req.on('close', onClientClose);
 
-      let upstream = await fetch(targetBase, {
-        method: req.method ?? 'POST',
-        headers,
-        body: finalBody ? new Uint8Array(finalBody) : undefined,
-        signal: upstreamAbort.signal,
-      });
+      const startTime = Date.now();
+      // Tracks which accounts we've already tried this request — used by the
+      // inside-request 429 failover loop to avoid re-hitting exhausted accounts.
+      const triedAliases = new Set<string>();
+      if (poolAccount) triedAliases.add(poolAccount.alias);
 
-      // Pool mode: capture rate-limit snapshot from the response. parseRateLimits
-      // returns status='rejected' on 429, which makes the next `select()` call
-      // route traffic away from this account until it resets.
-      if (pool && poolAccount) {
-        const snapshot = parseRateLimits(upstream.headers);
-        if (upstream.status === 429) {
-          pool.markRejected(poolAccount.alias, snapshot);
-        } else {
-          pool.updateRateLimits(poolAccount.alias, snapshot);
+      let upstream!: Response;
+      let peekedBody: string | null = null;
+
+      // Inside-request 429 failover loop (v3.8.0). On a 429, pool mode tries
+      // the next-best account before surfacing the error to the client.
+      // Bounded to pool.size iterations; breaks immediately on any non-429.
+      dispatchLoop: while (true) {
+        upstream = await fetch(targetBase, {
+          method: req.method ?? 'POST',
+          headers,
+          body: finalBody ? new Uint8Array(finalBody) : undefined,
+          signal: upstreamAbort.signal,
+        });
+
+        // Pool mode: capture rate-limit snapshot from the response. parseRateLimits
+        // returns status='rejected' on 429, which makes the next `select()` call
+        // route traffic away from this account until it resets.
+        if (pool && poolAccount) {
+          const snapshot = parseRateLimits(upstream.headers);
+          if (upstream.status === 429) {
+            pool.markRejected(poolAccount.alias, snapshot);
+          } else {
+            pool.updateRateLimits(poolAccount.alias, snapshot);
+          }
         }
-      }
 
       // Auto-retry without context-1m if it triggers a long-context billing error.
       // Anthropic returns this as either 400 ("long context beta is not yet available
@@ -775,7 +788,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       //
       // Note: `upstream.text()` consumes the body, so once we peek we MUST
       // handle the response here (can't fall through to the normal forwarder).
-      let peekedBody: string | null = null;
+      peekedBody = null;
       if ((upstream.status === 400 || upstream.status === 429) && !passthrough) {
         peekedBody = await upstream.text().catch(() => '');
         const isLongContextError = peekedBody.includes('long context')
@@ -804,7 +817,19 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             }
           }
         } else if (upstream.status === 429) {
-          // Not a context-1m issue — return enriched 429 directly
+          // Not a context-1m issue — try pool failover before surfacing to client
+          if (pool && poolAccount) {
+            const nextAccount = pool.selectExcluding(triedAliases);
+            if (nextAccount) {
+              triedAliases.add(nextAccount.alias);
+              poolAccount = nextAccount;
+              accessToken = nextAccount.accessToken;
+              headers['Authorization'] = `Bearer ${accessToken}`;
+              headers['x-claude-code-session-id'] = nextAccount.identity.sessionId;
+              peekedBody = null;
+              continue dispatchLoop;
+            }
+          }
           const enriched = enrich429(peekedBody, upstream.headers);
           const responseHeaders: Record<string, string> = {
             'Content-Type': 'application/json',
@@ -817,6 +842,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             }
           }
           requestCount++;
+          if (analytics && poolAccount) {
+            analytics.record({
+              timestamp: Date.now(), account: poolAccount.alias, model: requestModel,
+              inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, thinkingTokens: 0,
+              claim: poolAccount.rateLimit.claim, util5h: poolAccount.rateLimit.util5h,
+              util7d: poolAccount.rateLimit.util7d, overageUtil: poolAccount.rateLimit.overageUtil,
+              latencyMs: Date.now() - startTime, status: 429, isStream: false, isOpenAI,
+            });
+          }
           res.writeHead(429, responseHeaders);
           res.end(enriched);
           return;
@@ -840,6 +874,18 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
 
       // Enrich 429 errors with rate limit details from headers (Anthropic only returns "Error")
       if (upstream.status === 429) {
+        // Try pool failover before surfacing to client
+        if (pool && poolAccount) {
+          const nextAccount = pool.selectExcluding(triedAliases);
+          if (nextAccount) {
+            triedAliases.add(nextAccount.alias);
+            poolAccount = nextAccount;
+            accessToken = nextAccount.accessToken;
+            headers['Authorization'] = `Bearer ${accessToken}`;
+            headers['x-claude-code-session-id'] = nextAccount.identity.sessionId;
+            continue dispatchLoop;
+          }
+        }
         const errBody = await upstream.text().catch(() => '');
         const enriched = enrich429(errBody, upstream.headers);
         const responseHeaders: Record<string, string> = {
@@ -853,10 +899,23 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           }
         }
         requestCount++;
+        if (analytics && poolAccount) {
+          analytics.record({
+            timestamp: Date.now(), account: poolAccount.alias, model: requestModel,
+            inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, thinkingTokens: 0,
+            claim: poolAccount.rateLimit.claim, util5h: poolAccount.rateLimit.util5h,
+            util7d: poolAccount.rateLimit.util7d, overageUtil: poolAccount.rateLimit.overageUtil,
+            latencyMs: Date.now() - startTime, status: 429, isStream: false, isOpenAI,
+          });
+        }
         res.writeHead(429, responseHeaders);
         res.end(enriched);
         return;
       }
+
+      // Non-429 — exit dispatch loop and forward the response to client.
+      break;
+      } // end dispatchLoop: while (true)
 
       // Detect streaming from content-type (reliable) or body (fallback)
       const contentType = upstream.headers.get('content-type') ?? '';
@@ -891,6 +950,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       res.writeHead(upstream.status, responseHeaders);
 
       if (isStream && upstream.body) {
+        // Analytics accumulators for streaming responses — filled by parsing
+        // message_start / message_delta SSE events as they flow through.
+        let streamInputTokens = 0;
+        let streamOutputTokens = 0;
+        let streamCacheReadTokens = 0;
+        let streamCacheCreateTokens = 0;
+        const analyticsDecoder = (analytics && poolAccount) ? new TextDecoder() : null;
+        let analyticsBuffer = '';
+
         // Stream SSE chunks through
         const reader = upstream.body.getReader();
         const decoder = new TextDecoder();
@@ -909,6 +977,32 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+
+            // Parse SSE events for analytics regardless of routing branch
+            if (analyticsDecoder && value) {
+              analyticsBuffer += analyticsDecoder.decode(value, { stream: true });
+              const parts = analyticsBuffer.split('\n\n');
+              analyticsBuffer = parts.pop() ?? '';
+              for (const part of parts) {
+                const dataLine = part.split('\n').find(l => l.startsWith('data: '));
+                if (!dataLine) continue;
+                try {
+                  const e = JSON.parse(dataLine.slice(6)) as Record<string, unknown>;
+                  if (e.type === 'message_start') {
+                    const u = (e.message as { usage?: Record<string, number> } | undefined)?.usage;
+                    if (u) {
+                      streamInputTokens = u.input_tokens ?? 0;
+                      streamCacheReadTokens = u.cache_read_input_tokens ?? 0;
+                      streamCacheCreateTokens = u.cache_creation_input_tokens ?? 0;
+                    }
+                  } else if (e.type === 'message_delta') {
+                    const u = (e as { usage?: Record<string, number> }).usage;
+                    if (u?.output_tokens) streamOutputTokens = u.output_tokens;
+                  }
+                } catch { /* ignore malformed SSE events */ }
+              }
+            }
+
             if (isOpenAI) {
               // Translate Anthropic SSE → OpenAI SSE
               buffer += decoder.decode(value, { stream: true });
@@ -942,6 +1036,17 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           if (verbose) console.error('[dario] Stream error:', sanitizeError(err));
         }
         res.end();
+        if (analytics && poolAccount) {
+          analytics.record({
+            timestamp: Date.now(), account: poolAccount.alias, model: requestModel,
+            inputTokens: streamInputTokens, outputTokens: streamOutputTokens,
+            cacheReadTokens: streamCacheReadTokens, cacheCreateTokens: streamCacheCreateTokens,
+            thinkingTokens: 0,
+            claim: poolAccount.rateLimit.claim, util5h: poolAccount.rateLimit.util5h,
+            util7d: poolAccount.rateLimit.util7d, overageUtil: poolAccount.rateLimit.overageUtil,
+            latencyMs: Date.now() - startTime, status: upstream.status, isStream: true, isOpenAI,
+          });
+        }
       } else {
         // Buffer and forward
         let responseBody = await upstream.text();
@@ -958,6 +1063,23 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           }
         } else {
           res.end(responseBody);
+        }
+
+        if (analytics && poolAccount) {
+          try {
+            const parsed = JSON.parse(responseBody) as Record<string, unknown>;
+            const usage = Analytics.parseUsage(parsed);
+            analytics.record({
+              timestamp: Date.now(), account: poolAccount.alias,
+              model: usage.model || requestModel,
+              inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
+              cacheReadTokens: usage.cacheReadTokens, cacheCreateTokens: usage.cacheCreateTokens,
+              thinkingTokens: usage.thinkingTokens,
+              claim: poolAccount.rateLimit.claim, util5h: poolAccount.rateLimit.util5h,
+              util7d: poolAccount.rateLimit.util7d, overageUtil: poolAccount.rateLimit.overageUtil,
+              latencyMs: Date.now() - startTime, status: upstream.status, isStream: false, isOpenAI,
+            });
+          } catch { /* don't let analytics errors break responses */ }
         }
 
         if (verbose) console.log(`[dario] #${requestCount} ${upstream.status}`);

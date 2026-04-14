@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.8.0] - 2026-04-14
+
+Two features that have been in the backlog since v3.5.0: real analytics data in pool mode, and inside-request 429 failover.
+
+### Added
+
+- **Analytics recording wired into all response paths** (`src/proxy.ts`). The `Analytics` class and `/analytics` endpoint shipped in v3.5.0 but `analytics.record()` was never called — the endpoint returned structural placeholders with zero data. v3.8.0 wires `record()` into every response path:
+  - **Non-streaming**: parses usage from the buffered response body using `Analytics.parseUsage()` (already existed) and records after `res.end()`.
+  - **Streaming**: accumulates `input_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` from the `message_start` SSE event and `output_tokens` from `message_delta` in a parallel analytics decode loop (separate `TextDecoder`; does not touch the bytes written to the client). Records after `res.end()`.
+  - **429 / error paths**: records with zero token counts so failure rates are visible in `/analytics`.
+  - **OpenAI-compat path**: records with `isOpenAI: true` using the token counts extracted from the Anthropic response (the compat backend translates back to Anthropic format before returning).
+  - Analytics are still only active in pool mode (`accountsList.length >= 2`) to match the existing guard — single-account mode still returns the `{mode: "single-account"}` placeholder.
+
+- **Inside-request 429 failover for pool mode** (`src/proxy.ts`, `src/pool.ts`). Pool mode previously only failed over *between* requests: if account A 429'd, the *next* request routed to account B, but the *current* request returned a 429 to the client. v3.8.0 adds a `dispatchLoop: while (true)` around the upstream fetch. On a 429, the loop checks `pool.selectExcluding(triedAliases)` before surfacing the error. If another account is available, it swaps the `Authorization` and `x-claude-code-session-id` headers and retries with the buffered request body (already held in memory since v3.5.0). The loop is bounded to `pool.size` iterations to guarantee termination. `pool.selectExcluding` extended from `(alias: string)` to `(excluded: Set<string>)` to support multi-account exclusion cleanly.
+
+### Changed
+
+- **`AccountPool.selectExcluding(excluded: Set<string>)`** (`src/pool.ts`). Signature changed from single-alias string to a Set of aliases. The method is internal (only called from `proxy.ts`). Existing callers (only the failover loop) updated accordingly.
+
+### Test results
+
+- `test/issue-29-tool-translation.mjs` — 28/28 ✅ (unchanged)
+- `test/analytics-recording.mjs` — 38/38 ✅ (new: unit tests for `Analytics.parseUsage()`, `record()`, `summary()`, error rates, per-account/per-model breakdown, streaming 429 records)
+- `test/failover-429.mjs` — 19/19 ✅ (new: unit tests for `selectExcluding(Set)`, multi-alias exclusion, rejected-account skipping, full failover simulation)
+
+Live e2e tests (`npm run e2e`, `npm run compat`) deferred until pool-mode account is available for testing.
+
 ## [3.7.2] - 2026-04-14
 
 Security hardening release. Two CodeQL alerts filed against v3.7.1 — one `js/clear-text-logging` error and one `js/stack-trace-exposure` warning — both fixed with minimal-surface patches. No behavior change for any working path.

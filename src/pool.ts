@@ -144,12 +144,12 @@ export class AccountPool {
     return all.reduce((a, b) => a.requestCount < b.requestCount ? a : b);
   }
 
-  /** Select the next-best account, excluding the given alias. */
-  selectExcluding(excludeAlias: string): PoolAccount | null {
+  /** Select the next-best account, excluding the given set of aliases. */
+  selectExcluding(excluded: Set<string>): PoolAccount | null {
     if (this.accounts.size <= 1) return null;
 
     const now = Date.now();
-    const candidates = [...this.accounts.values()].filter(a => a.alias !== excludeAlias);
+    const candidates = [...this.accounts.values()].filter(a => !excluded.has(a.alias));
 
     const eligible = candidates.filter(a =>
       a.rateLimit.status !== 'rejected' &&
