@@ -147,10 +147,15 @@ async function proxy() {
   const verbose = args.includes('--verbose') || args.includes('-v');
   const passthrough = args.includes('--passthrough') || args.includes('--thin');
   const preserveTools = args.includes('--preserve-tools') || args.includes('--keep-tools');
+  const hybridTools = args.includes('--hybrid-tools') || args.includes('--context-inject');
+  if (preserveTools && hybridTools) {
+    console.error('[dario] --preserve-tools and --hybrid-tools are mutually exclusive. Pick one.');
+    process.exit(1);
+  }
   const modelArg = args.find(a => a.startsWith('--model='));
   const model = modelArg ? modelArg.split('=')[1] : undefined;
 
-  await startProxy({ port, host, verbose, model, passthrough, preserveTools });
+  await startProxy({ port, host, verbose, model, passthrough, preserveTools, hybridTools });
 }
 
 async function accounts() {
@@ -389,6 +394,10 @@ async function help() {
                              Default: passthrough (client decides)
     --passthrough, --thin    Thin proxy — OAuth swap only, no injection
     --preserve-tools         Keep client tool schemas (for agents with custom tools)
+    --hybrid-tools           Remap to CC tools AND inject request-context fields
+                             (sessionId, requestId, channelId, userId, timestamp)
+                             declared on the client's tool schema but missing
+                             from CC's. Preserves CC fingerprint. See #33.
     --port=PORT              Port to listen on (default: 3456)
     --host=ADDRESS           Address to bind to (default: 127.0.0.1)
                              Use 0.0.0.0 to accept connections from other machines.

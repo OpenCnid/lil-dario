@@ -246,6 +246,7 @@ curl http://localhost:3456/analytics    # per-account / per-model stats, burn ra
 |---|---|---|
 | `--passthrough` / `--thin` | Thin proxy for the Claude backend — OAuth swap only, no template injection | off |
 | `--preserve-tools` / `--keep-tools` | Keep client tool schemas instead of remapping to CC's `Bash/Read/Grep/Glob/WebSearch/WebFetch`. Required for clients whose tools have fields CC doesn't (`sessionId`, custom ids, etc.) — see [Custom tool schemas](#custom-tool-schemas). Trade-off: drops the CC request fingerprint. | off |
+| `--hybrid-tools` / `--context-inject` | Remap to CC tools **and** inject request-context values (`sessionId`, `requestId`, `channelId`, `userId`, `timestamp`) into client-declared fields CC's schema doesn't carry. Preserves the CC fingerprint while keeping custom schemas functional — see [Hybrid tool mode](#hybrid-tool-mode). Mutually exclusive with `--preserve-tools`. | off |
 | `--model=<name>` | Force a model (`opus`, `sonnet`, `haiku`, or full ID). Applies to the Claude backend. | passthrough |
 | `--port=<n>` | Port to listen on | `3456` |
 | `--host=<addr>` / `DARIO_HOST` | Bind address. Use `0.0.0.0` for LAN, or a specific IP (e.g. a Tailscale interface). When non-loopback, also set `DARIO_API_KEY`. | `127.0.0.1` |
@@ -361,9 +362,35 @@ Fix: run dario with `--preserve-tools` (or `--keep-tools`). That skips the CC to
 dario proxy --preserve-tools
 ```
 
-The cost: requests no longer look like CC on the wire, so the CC subscription fingerprint is gone. On a Max/Pro plan, that means the request may be counted against your API usage rather than your subscription quota. If you're on API-key billing already, `--preserve-tools` is free; if you're using dario specifically to route against a subscription, decide whether your custom-schema workload is worth the fingerprint loss on that endpoint. (A hybrid mode that keeps the fingerprint and also passes through unmapped client fields is on the roadmap.)
+The cost: requests no longer look like CC on the wire, so the CC subscription fingerprint is gone. On a Max/Pro plan, that means the request may be counted against your API usage rather than your subscription quota. If you're on API-key billing already, `--preserve-tools` is free; if you're using dario specifically to route against a subscription, the [hybrid tool mode](#hybrid-tool-mode) below is the compromise that keeps both.
 
 The openai-compat backend (OpenRouter, OpenAI, Groq, local LiteLLM, etc.) is unaffected — it forwards tool definitions byte-for-byte and doesn't need this flag.
+
+### Hybrid tool mode
+
+For the very common case where the "missing" fields on your client's tool are **request context** — `sessionId`, `requestId`, `channelId`, `userId`, `timestamp` — dario can remap to CC tools *and* inject those values on the reverse path. The fingerprint stays intact, the model still sees only CC's tools (so subscription billing still routes), and your validator still sees the fields it requires because dario fills them from request headers on the way back.
+
+```bash
+dario proxy --hybrid-tools
+```
+
+**How it works.** On each request, dario builds a `RequestContext` from headers (`x-session-id`, `x-request-id`, `x-channel-id`, `x-user-id`) plus its own generated ids and the current timestamp. After `translateBack` produces the client-shaped tool call on the response path, any field declared on the client's tool schema whose name matches a known context field (`sessionId`/`session_id`, `requestId`/`request_id`, `channelId`/`channel_id`, `userId`/`user_id`, `timestamp`/`created_at`/`createdAt`) and isn't already populated gets filled from the context. Fields the model genuinely populated via `translateBack` are never overwritten.
+
+**When to use which flag.**
+
+| Your situation | Flag | Why |
+|---|---|---|
+| Your custom fields are request context (session/request/channel/user ids, timestamps) | `--hybrid-tools` | Keeps the CC fingerprint *and* your validator is satisfied. |
+| Your custom fields need the model's reasoning (e.g. `confidence`, `reasoning_trace`, `tool_selection_rationale`) | `--preserve-tools` | The model has to see the real schema to populate these. Accept the fingerprint loss. |
+| Your client's tools are already a subset of CC's `Bash/Read/Grep/Glob/WebSearch/WebFetch` | *(neither)* | Default mode works as-is. |
+
+**Limitations of hybrid mode.**
+
+- Top-level fields only. If your custom field is nested (e.g. `meta: {sessionId: ...}`), v1 doesn't reach into the nested object. Tracked in [#33](https://github.com/askalf/dario/issues/33).
+- The field-to-context mapping is a fixed list. If you need arbitrary fields (e.g. an internal `tenant_id`) pulled from headers, file an issue and we'll extend the map.
+- No type coercion beyond string. If your schema requires a numeric `sessionId`, dario sends the string it got from headers — override at your client level or use `--preserve-tools`.
+
+Hybrid mode was built to resolve [#29](https://github.com/askalf/dario/issues/29) cleanly for OpenClaw-style agents whose `process` tool declares `sessionId`, after the full provider-comparison diagnostic from [@boeingchoco](https://github.com/boeingchoco) made clear that the problem wasn't fixable in the translation layer alone.
 
 ### Library mode
 
@@ -549,7 +576,7 @@ npm run dev   # runs with tsx, no build step
 | [@belangertrading](https://github.com/belangertrading) | Billing classification investigation ([#4](https://github.com/askalf/dario/issues/4)), cache_control fingerprinting ([#6](https://github.com/askalf/dario/issues/6)), billing reclassification root cause ([#7](https://github.com/askalf/dario/issues/7)), OAuth client_id discovery ([#12](https://github.com/askalf/dario/issues/12)), multi-agent session-level billing analysis ([#23](https://github.com/askalf/dario/issues/23)) |
 | [@nathan-widjaja](https://github.com/nathan-widjaja) | README positioning rewrite structure ([#21](https://github.com/askalf/dario/issues/21)) |
 | [@iNicholasBE](https://github.com/iNicholasBE) | macOS keychain credential detection ([#30](https://github.com/askalf/dario/pull/30)) |
-| [@boeingchoco](https://github.com/boeingchoco) | Reverse-direction tool parameter translation ([#29](https://github.com/askalf/dario/issues/29)), SSE event-group framing regression catch (v3.7.1), provider-comparison diagnostic that surfaced the `--preserve-tools` discoverability gap (v3.8.1) |
+| [@boeingchoco](https://github.com/boeingchoco) | Reverse-direction tool parameter translation ([#29](https://github.com/askalf/dario/issues/29)), SSE event-group framing regression catch (v3.7.1), provider-comparison diagnostic that surfaced the `--preserve-tools` discoverability gap (v3.8.1), and the motivating case for hybrid tool mode ([#33](https://github.com/askalf/dario/issues/33), v3.9.0) |
 
 ---
 

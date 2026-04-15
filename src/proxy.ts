@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { arch, platform } from 'node:process';
 import { getAccessToken, getStatus } from './oauth.js';
-import { buildCCRequest, reverseMapResponse, createStreamingReverseMapper, type ToolMapping } from './cc-template.js';
+import { buildCCRequest, reverseMapResponse, createStreamingReverseMapper, type ToolMapping, type RequestContext } from './cc-template.js';
 import { AccountPool, parseRateLimits, type PoolAccount } from './pool.js';
 import { Analytics } from './analytics.js';
 import { loadAllAccounts, loadAccount, refreshAccountToken } from './accounts.js';
@@ -293,6 +293,7 @@ interface ProxyOptions {
   model?: string;  // Override model in all requests
   passthrough?: boolean;  // Thin proxy — OAuth swap only, no injection
   preserveTools?: boolean;  // Keep client tool schemas (for agents with custom tools)
+  hybridTools?: boolean;    // Remap to CC tools but inject request-context fields on return (#33)
 }
 
 export function sanitizeError(err: unknown): string {
@@ -635,6 +636,20 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       let finalBody: Buffer | undefined = body.length > 0 ? body : undefined;
       let ccToolMap: Map<string, ToolMapping> | null = null;
       let requestModel = '';
+      // Request context for hybrid-mode field injection (#33). Built once
+      // per request from incoming headers so the reverse mapper can fill
+      // client-declared fields like `sessionId` that CC's schema doesn't
+      // carry. Undefined when hybridTools is off — the reverse path then
+      // skips injection entirely.
+      const reqCtx: RequestContext | undefined = opts.hybridTools ? {
+        sessionId: (req.headers['x-session-id'] as string | undefined)
+          ?? (req.headers['x-client-session-id'] as string | undefined)
+          ?? SESSION_ID,
+        requestId: (req.headers['x-request-id'] as string | undefined) ?? randomUUID(),
+        channelId: req.headers['x-channel-id'] as string | undefined,
+        userId: req.headers['x-user-id'] as string | undefined,
+        timestamp: new Date().toISOString(),
+      } : undefined;
       if (body.length > 0) {
         try {
           const parsed = JSON.parse(body.toString()) as Record<string, unknown>;
@@ -663,7 +678,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             const { body: ccBody, toolMap } = buildCCRequest(
               r, billingTag, CACHE_1H,
               bodyIdentity,
-              { preserveTools: opts.preserveTools ?? false },
+              {
+                preserveTools: opts.preserveTools ?? false,
+                hybridTools: opts.hybridTools ?? false,
+              },
             );
 
             // Store tool map for response reverse-mapping
@@ -969,7 +987,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         // path; the non-streaming reverseMapResponse covers buffered
         // responses below.
         const streamMapper = ccToolMap && !isOpenAI
-          ? createStreamingReverseMapper(ccToolMap)
+          ? createStreamingReverseMapper(ccToolMap, reqCtx)
           : null;
         try {
           let buffer = '';
@@ -1052,7 +1070,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         let responseBody = await upstream.text();
 
         // Reverse tool name mapping so client sees original names
-        if (ccToolMap) responseBody = reverseMapResponse(responseBody, ccToolMap);
+        if (ccToolMap) responseBody = reverseMapResponse(responseBody, ccToolMap, reqCtx);
 
         if (isOpenAI && upstream.status >= 200 && upstream.status < 300) {
           try {

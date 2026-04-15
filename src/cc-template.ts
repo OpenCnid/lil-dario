@@ -79,6 +79,71 @@ export interface ToolMapping {
   ccTool: string;
   translateArgs?: (args: Record<string, unknown>) => Record<string, unknown>;
   translateBack?: (args: Record<string, unknown>) => Record<string, unknown>;
+  /**
+   * Top-level field names the client's original tool schema declared.
+   * Populated only in hybrid mode (`hybridTools: true`) so the reverse
+   * path can inject request-context values (sessionId, requestId, …)
+   * into fields CC's schema doesn't carry. Unset in default mode.
+   */
+  clientFields?: string[];
+}
+
+/**
+ * Request context extracted once per incoming request. Source for
+ * hybrid-mode field injection — fields declared on the client's tool
+ * but not on CC's get filled from here on the reverse path.
+ */
+export interface RequestContext {
+  sessionId: string;
+  requestId: string;
+  channelId?: string;
+  userId?: string;
+  timestamp: string; // ISO 8601
+}
+
+/**
+ * Map from client-declared field name (lowercase) to the RequestContext
+ * key that supplies its value. A field declared on the client's tool
+ * whose name matches one of these gets auto-filled in hybrid mode.
+ *
+ * Case-insensitive match on the client's declared field name. Both
+ * snake_case and camelCase variants map to the same source.
+ */
+const CONTEXT_FIELD_SOURCES: Record<string, keyof RequestContext> = {
+  sessionid: 'sessionId',
+  session_id: 'sessionId',
+  requestid: 'requestId',
+  request_id: 'requestId',
+  channelid: 'channelId',
+  channel_id: 'channelId',
+  userid: 'userId',
+  user_id: 'userId',
+  timestamp: 'timestamp',
+  createdat: 'timestamp',
+  created_at: 'timestamp',
+};
+
+/**
+ * Fill in fields declared on the client's tool schema that are still
+ * absent from the translated input, drawing values from the request
+ * context. Only runs when a mapping has `clientFields` populated
+ * (hybrid mode) and an input object is present. Fields already set
+ * by `translateBack` are never overwritten.
+ */
+function injectContextFields(
+  input: Record<string, unknown>,
+  clientFields: string[] | undefined,
+  ctx: RequestContext | undefined,
+): Record<string, unknown> {
+  if (!clientFields || !ctx) return input;
+  for (const field of clientFields) {
+    if (field in input && input[field] !== undefined && input[field] !== null && input[field] !== '') continue;
+    const sourceKey = CONTEXT_FIELD_SOURCES[field.toLowerCase()];
+    if (!sourceKey) continue;
+    const value = ctx[sourceKey];
+    if (value !== undefined) input[field] = value;
+  }
+  return input;
 }
 
 const TOOL_MAP: Record<string, ToolMapping> = {
@@ -244,7 +309,7 @@ export function buildCCRequest(
   billingTag: string,
   cache1h: { type: 'ephemeral'; ttl: '1h' },
   identity: { deviceId: string; accountUuid: string; sessionId: string },
-  opts: { preserveTools?: boolean } = {},
+  opts: { preserveTools?: boolean; hybridTools?: boolean } = {},
 ): { body: Record<string, unknown>; toolMap: Map<string, ToolMapping>; unmappedTools: string[] } {
 
   const model = clientBody.model as string || 'claude-sonnet-4-6';
@@ -286,7 +351,17 @@ export function buildCCRequest(
       const name = (tool.name as string || '').toLowerCase();
       const mapping = TOOL_MAP[name];
       if (mapping) {
-        activeToolMap.set(tool.name as string, mapping);
+        // In hybrid mode, clone the shared mapping and attach the
+        // client-declared top-level field names from input_schema.
+        // The reverse path uses these to inject request-context values
+        // into fields CC's schema doesn't carry.
+        if (opts.hybridTools) {
+          const schema = tool.input_schema as { properties?: Record<string, unknown> } | undefined;
+          const fields = schema?.properties ? Object.keys(schema.properties) : [];
+          activeToolMap.set(tool.name as string, { ...mapping, clientFields: fields });
+        } else {
+          activeToolMap.set(tool.name as string, mapping);
+        }
         claimedCC.add(mapping.ccTool);
       }
     }
@@ -502,6 +577,7 @@ function buildReverseLookup(toolMap: Map<string, ToolMapping>): Map<string, { cl
 function rewriteToolUseBlock(
   block: Record<string, unknown>,
   reverseMap: Map<string, { clientName: string; mapping: ToolMapping }>,
+  ctx?: RequestContext,
 ): void {
   const ccName = block.name;
   if (typeof ccName !== 'string') return;
@@ -518,6 +594,13 @@ function rewriteToolUseBlock(
       // the same broken input it would have seen pre-v3.7.0.
     }
   }
+  // Hybrid mode: inject request-context values into any client-declared
+  // fields still missing after translateBack. No-op unless the mapping
+  // was built with `clientFields` populated (hybridTools: true) and a
+  // context was passed in.
+  if (entry.mapping.clientFields && block.input && typeof block.input === 'object') {
+    injectContextFields(block.input as Record<string, unknown>, entry.mapping.clientFields, ctx);
+  }
 }
 
 /**
@@ -530,6 +613,7 @@ function rewriteToolUseBlock(
 export function reverseMapResponse(
   responseBody: string,
   toolMap: Map<string, ToolMapping>,
+  ctx?: RequestContext,
 ): string {
   if (toolMap.size === 0) return responseBody;
 
@@ -547,7 +631,7 @@ export function reverseMapResponse(
 
   for (const block of content) {
     if (block && typeof block === 'object' && (block as Record<string, unknown>).type === 'tool_use') {
-      rewriteToolUseBlock(block as Record<string, unknown>, reverseMap);
+      rewriteToolUseBlock(block as Record<string, unknown>, reverseMap, ctx);
     }
   }
 
@@ -614,6 +698,7 @@ interface BufferedToolBlock {
 
 export function createStreamingReverseMapper(
   toolMap: Map<string, ToolMapping>,
+  ctx?: RequestContext,
 ): StreamingReverseMapper {
   const noop: StreamingReverseMapper = {
     feed: (chunk) => chunk,
@@ -622,11 +707,16 @@ export function createStreamingReverseMapper(
   if (toolMap.size === 0) return noop;
 
   const reverseMap = buildReverseLookup(toolMap);
-  // If no mapping needs translation, fall back to identity behavior
-  // so we don't pay the SSE-parsing cost on every chunk.
+  // If no mapping needs translation OR context injection, fall back to
+  // identity behavior so we don't pay the SSE-parsing cost on every chunk.
+  // Hybrid mode with clientFields always needs the streaming path so the
+  // injection can run at content_block_stop.
   let anyNeedsTranslation = false;
   for (const { mapping } of reverseMap.values()) {
-    if (mapping.translateBack) { anyNeedsTranslation = true; break; }
+    if (mapping.translateBack || (mapping.clientFields && mapping.clientFields.length > 0)) {
+      anyNeedsTranslation = true;
+      break;
+    }
   }
   if (!anyNeedsTranslation) return noop;
 
@@ -702,7 +792,11 @@ export function createStreamingReverseMapper(
       const block = event.content_block as Record<string, unknown> | undefined;
       if (block && block.type === 'tool_use' && typeof block.name === 'string') {
         const entry = reverseMap.get(block.name);
-        if (entry && entry.mapping.translateBack && idx >= 0) {
+        const needsBuffering = entry && idx >= 0 && (
+          entry.mapping.translateBack ||
+          (entry.mapping.clientFields && entry.mapping.clientFields.length > 0)
+        );
+        if (entry && needsBuffering) {
           // Stash the block so we can flush a translated version at
           // content_block_stop. Emit a rewritten start event now so
           // the client sees its own tool name immediately.
@@ -755,6 +849,9 @@ export function createStreamingReverseMapper(
         translatedInput = buf.mapping.translateBack
           ? buf.mapping.translateBack(parsedInput)
           : parsedInput;
+        if (buf.mapping.clientFields && buf.mapping.clientFields.length > 0) {
+          injectContextFields(translatedInput, buf.mapping.clientFields, ctx);
+        }
       } catch {
         parseOk = false;
       }

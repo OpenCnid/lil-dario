@@ -2,6 +2,65 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.9.0] - 2026-04-14
+
+**Hybrid tool mode** — resolves [#33](https://github.com/askalf/dario/issues/33), the roadmap item promised to [@boeingchoco](https://github.com/boeingchoco) in the v3.8.1 thread. Keep the CC request fingerprint AND let custom-schema clients see their declared non-CC fields on tool_use responses.
+
+### Background
+
+After the reverse-direction tool parameter translation fix in v3.7.0/v3.7.1, [@boeingchoco](https://github.com/boeingchoco) was still seeing `sessionId is required for this action.` from OpenClaw's validator on the Claude backend. v3.8.1 surfaced `--preserve-tools` as the escape hatch but made the trade-off explicit: the flag preserves the client's schema at the cost of the CC request fingerprint, which is what routes Max/Pro subscription billing. Users with custom-schema workloads who also wanted subscription pricing had no path. Hybrid mode fills it.
+
+The key observation: the "missing" fields are usually **request context** — `sessionId`, `requestId`, `channelId`, `userId`, `timestamp` — values dario already has from the incoming request, not values that need the model's reasoning. So dario can keep the forward path untouched (CC fingerprint preserved, Bash/Read/Grep/Glob/WebSearch/WebFetch sent upstream) and inject context values on the reverse path after `translateBack`. Both constraints satisfied.
+
+### Added
+
+- **`--hybrid-tools` flag** (alias `--context-inject`) in `src/cli.ts`. Mutually exclusive with `--preserve-tools` — the CLI rejects both with a clear error. Threaded through `ProxyOptions.hybridTools` to `startProxy`.
+
+- **`RequestContext` type** in `src/cc-template.ts`. Fields: `sessionId`, `requestId`, `channelId`, `userId`, `timestamp` (ISO 8601). Built once per request in `src/proxy.ts` from `x-session-id` / `x-request-id` / `x-channel-id` / `x-user-id` headers, with fallbacks to the proxy's internal `SESSION_ID` and a generated `randomUUID()`.
+
+- **`CONTEXT_FIELD_SOURCES` map** — a case-insensitive lookup from client-declared field name to `RequestContext` key. Initial set covers snake_case and camelCase variants of `sessionId`, `requestId`, `channelId`, `userId`, `timestamp`, `created_at`, `createdAt`.
+
+- **`injectContextFields(input, clientFields, ctx)`** — the hybrid-mode injection function. Walks each client-declared field, skips any already populated by `translateBack`, looks up the field in `CONTEXT_FIELD_SOURCES`, and fills from `ctx` when matched. No-op when `clientFields` is unset (default mode) or `ctx` is undefined.
+
+- **`ToolMapping.clientFields`** — optional array of top-level field names the client's tool schema declared. Populated in `buildCCRequest` only when `opts.hybridTools` is true; each matched mapping gets a shallow clone so the shared `TOOL_MAP` entries aren't mutated across requests.
+
+- **`test/hybrid-tools.mjs`** — 24 assertions across 6 test cases: default-mode (no injection baseline), hybrid-mode basic injection, snake_case variant, no-ctx no-op, translateBack fields not clobbered, streaming + hybrid end-to-end. All green.
+
+### Changed
+
+- **`reverseMapResponse(body, toolMap, ctx?)`** — now takes an optional `RequestContext`. Passes it into `rewriteToolUseBlock` so hybrid-mode injection runs after `translateBack`. Backward compatible: pre-3.9.0 call sites that didn't pass `ctx` still work as pure reverse-translation.
+
+- **`createStreamingReverseMapper(toolMap, ctx?)`** — same signature extension. The injection point is after the `content_block_stop` path parses the buffered `partial_json` and applies `translateBack`. The `anyNeedsTranslation` fast-path check now also considers `clientFields` so hybrid-mode mappings always take the buffering path (required — injection has to run at end-of-block, not per-chunk).
+
+- **`src/proxy.ts`** — extracts `reqCtx: RequestContext | undefined` once per request (only when `opts.hybridTools` is set). Threads through to both `reverseMapResponse` and `createStreamingReverseMapper`. `buildCCRequest` call updated to pass `hybridTools: opts.hybridTools ?? false`.
+
+- **`src/cc-template.ts` — `buildCCRequest` two-pass tool map construction**. First pass now conditionally clones the shared `TOOL_MAP` entry and attaches `clientFields` from the client's `input_schema.properties` when hybrid mode is active. Zero allocation in default mode.
+
+- **README.md** — new `### Hybrid tool mode` subsection with when-to-use table, how-it-works explanation, and limitations spelled out. The `### Custom tool schemas` subsection links forward to it as the recommended compromise for users who want subscription billing on custom-schema workloads.
+
+- **`npm test`** — adds `test/hybrid-tools.mjs` to the default test runner. Full suite now at 109 assertions across four files (issue-29: 28, hybrid-tools: 24, analytics-recording: 38, failover-429: 19).
+
+### Not changed
+
+- **Default mode behavior is unchanged.** Clients that don't pass `--hybrid-tools` get the exact same forward/reverse path they did on v3.8.1. Zero risk of regression for existing setups.
+- **`--preserve-tools` is unchanged.** Still the right answer for clients whose custom fields need the model's reasoning (not just request context).
+- **Tool `TOOL_MAP` entries are unchanged.** Same forward/back translations as v3.7.1.
+- **Streaming tool_use semantics for non-hybrid clients are unchanged.** The buffering path is the same; only mappings with `clientFields` set take the new injection branch.
+
+### Scope limitations (tracked in #33 for follow-up)
+
+- **Top-level fields only.** Nested object injection (`meta: {sessionId: ...}`) is not supported in v1.
+- **Fixed field list.** Arbitrary custom field names (e.g. internal `tenant_id`) are not auto-mapped. File an issue if you need the `CONTEXT_FIELD_SOURCES` map extended.
+- **No type coercion.** Injected values are always strings (from headers or ISO timestamps). Clients requiring typed values should use `--preserve-tools`.
+
+### Credit
+
+[@boeingchoco](https://github.com/boeingchoco) — fourth consecutive release with contribution credit. The original #29 report, the v3.7.1 SSE regression catch, the v3.8.1 provider-comparison diagnostic, and now the motivating case for this entire hybrid-mode design. Contributors table in the README updated to reflect the scope of contribution across all four releases.
+
+```bash
+npm install -g @askalf/dario@3.9.0
+```
+
 ## [3.8.1] - 2026-04-14
 
 Documentation release. No code change. Surfaces [`--preserve-tools`](README.md#custom-tool-schemas) as the first-class answer for clients whose tool schemas carry fields CC's schema doesn't — credit to [@boeingchoco](https://github.com/boeingchoco) for the diagnostic work on [#29](https://github.com/askalf/dario/issues/29) that surfaced the discoverability gap.
