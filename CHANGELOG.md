@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.9.5] - 2026-04-14
+
+Second fix for [#36](https://github.com/askalf/dario/issues/36). v3.9.4 fixed the `context-1m` retry loop; this release tackles the hybrid-tool reverse-mapping issues in the same report after pulling OpenClaw's source and reading their actual tool definitions. Two real bugs, one honest design admission.
+
+### Fixed
+
+- **`bash`-family `translateBack` now emits `command`, not `cmd`** (`src/cc-template.ts`). The `bash`, `exec`, `shell`, `run`, `command`, and `terminal` entries in TOOL_MAP were all emitting `{cmd: <CC command>}` on the reverse path. But every real client using one of those tool names — Anthropic's own standard `bash` convention, OpenClaw's `exec` (verified against [apps/shared/.../bash-tools.exec.ts:1340](https://github.com/openclaw/openclaw/blob/main/src/agents/bash-tools.exec.ts) where the handler does `params.command` and throws "Provide a command to start." on missing field) — declares `command` on its schema, not `cmd`. The translation was writing into a field nobody had declared. Changed to emit `{command: ...}` across all six bash-family aliases. `process` still emits `{action}` (OpenClaw's `process` session-manager tool actually wants `action` as the discriminator, verified against `bash-tools.process.ts:127`).
+
+- **Hybrid mode now drops unmapped tools instead of round-robin'ing them onto CC fallbacks** (`src/cc-template.ts`). OpenClaw declares ~50 custom tools (`lobster`, `memory_get`, `memory_search`, `feishu_*`, `discord_*`, ...), none of which are in dario's TOOL_MAP. Pre-fix, the unmapped-tool distributor assigned them round-robin onto `[Bash, Read, Grep, Glob, WebSearch, WebFetch]`. Forward direction: the model saw CC's tool set and called `Grep` with a pattern. Reverse direction: dario renamed `Grep` → `lobster` and handed OpenClaw `{pattern: "..."}` on a tool whose handler expected `{action: "run"|"resume"}` and threw `Unknown action: undefined`. "Glob misrouted to memory_get" was the same mechanism: round-robin collision plus no reverse-shape fidelity.
+
+  The hybrid-mode contract can't support this — adding custom tools alongside CC's set would break the fingerprint that makes hybrid mode worth using in the first place. Honest fix: in hybrid mode, drop unmapped tools at request build time. The model upstream never sees them, never calls them, never corrupts anything. `buildCCRequest` still reports them in the returned `unmappedTools` array so the caller (and future verbose logging) can surface which tools were dropped. **Default mode is unchanged** — round-robin fallback still applies there so existing simple clients don't regress.
+
+### Known limitation (now documented in code)
+
+- **`process`-style action-discriminator tools are fundamentally lossy under any TOOL_MAP translation.** OpenClaw's `process` tool takes `{action: "list"|"poll"|"log"|..., sessionId?, data?, keys?, hex?, literal?, text?, bracketed?, eof?, offset?, limit?, timeout?}`. Flattening the action onto `Bash.command` loses every sibling field, so the model upstream can only ever drive a subset of the tool's functionality. The TOOL_MAP.process entry is still present so the fingerprint check stays green and `process.action` still round-trips correctly for the one field it maps, but a comment now warns that clients with rich discriminator tools should use `--preserve-tools` rather than rely on hybrid mode to do the impossible.
+
+### Added
+
+- **12 new hybrid-tools test assertions** (`test/hybrid-tools.mjs`): exec/bash reverse translation produces `command`, no stale `cmd` field leaks through, hybrid mode drops lobster + memory_get from activeToolMap, default mode still round-robins them (regression guard). Suite total: 33 pass / 0 fail.
+
+### Methodology note
+
+v3.9.4 asked @boeingchoco for OpenClaw's tool schema to diagnose the remaining #36 issues. The user (correctly) pointed out that OpenClaw is open-source on GitHub and the schemas are one `git clone` away. Cloned `openclaw/openclaw` main, grepped for the relevant tool definitions, and the three bugs above were visible within ten minutes. Should not have outsourced that lookup.
+
 ## [3.9.4] - 2026-04-14
 
 Fixes a verbose-log flood reported by [@boeingchoco](https://github.com/boeingchoco) in [#36](https://github.com/askalf/dario/issues/36): on accounts without the context-1m beta entitlement, dario was re-sending `context-1m-2025-08-07` with every request, eating a 400/429 + retry round-trip per POST for the whole session.

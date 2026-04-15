@@ -162,36 +162,47 @@ function injectContextFields(
 
 const TOOL_MAP: Record<string, ToolMapping> = {
   // Direct maps
+  // Note on translateBack field names: the vast majority of client bash-like
+  // tools use `command` (the Anthropic convention), not `cmd`. OpenClaw's
+  // `exec` tool takes `{command, workdir, env, ...}` (dario#36 triage).
+  // Hybrid mode overrides these with the actual client schema via clientFields,
+  // but default mode relies on these output names being the common case.
   bash: {
     ccTool: 'Bash',
     translateArgs: (a) => ({ command: a.cmd || a.command || a.c || '' }),
-    translateBack: (a) => ({ cmd: a.command ?? '' }),
+    translateBack: (a) => ({ command: a.command ?? '' }),
   },
   exec: {
     ccTool: 'Bash',
     translateArgs: (a) => ({ command: a.cmd || a.command || a.c || '' }),
-    translateBack: (a) => ({ cmd: a.command ?? '' }),
+    translateBack: (a) => ({ command: a.command ?? '' }),
   },
   shell: {
     ccTool: 'Bash',
     translateArgs: (a) => ({ command: a.cmd || a.command || a.c || '' }),
-    translateBack: (a) => ({ cmd: a.command ?? '' }),
+    translateBack: (a) => ({ command: a.command ?? '' }),
   },
   run: {
     ccTool: 'Bash',
     translateArgs: (a) => ({ command: a.cmd || a.command || '' }),
-    translateBack: (a) => ({ cmd: a.command ?? '' }),
+    translateBack: (a) => ({ command: a.command ?? '' }),
   },
   command: {
     ccTool: 'Bash',
     translateArgs: (a) => ({ command: a.cmd || a.command || '' }),
-    translateBack: (a) => ({ cmd: a.command ?? '' }),
+    translateBack: (a) => ({ command: a.command ?? '' }),
   },
   terminal: {
     ccTool: 'Bash',
     translateArgs: (a) => ({ command: a.cmd || a.command || '' }),
-    translateBack: (a) => ({ cmd: a.command ?? '' }),
+    translateBack: (a) => ({ command: a.command ?? '' }),
   },
+  // `process` is OpenClaw's session-manager tool — it's an action-discriminator
+  // shape {action: "list"|"poll"|"log"|..., sessionId?, ...}. Flattening it onto
+  // Bash.command loses all sibling fields (data, keys, hex, literal, text, ...),
+  // so the model upstream can't actually drive it. Kept mapped for fingerprint
+  // continuity but the reverse translation is inherently lossy — clients with a
+  // process-style tool should use --preserve-tools instead of --hybrid-tools.
   process: {
     ccTool: 'Bash',
     translateArgs: (a) => ({ command: a.action || a.cmd || '' }),
@@ -380,15 +391,32 @@ export function buildCCRequest(
       }
     }
 
+    // Unmapped-tool handling differs by mode:
+    //
+    // - Default mode: round-robin to CC fallback tools. The model sees the CC
+    //   tool set, any tool call is "something", and we best-effort relay it
+    //   back to the client tool name. Broken-by-design for clients with rich
+    //   discriminator tools (OpenClaw lobster/memory_get, dario#36), but
+    //   preserves the old behavior for simple clients that don't have many
+    //   unmapped tools.
+    //
+    // - Hybrid mode: DROP unmapped tools entirely. We can't forward them to
+    //   the upstream (adding to CC_TOOL_DEFINITIONS breaks the fingerprint),
+    //   and round-robin mapping produces nonsense shapes on the reverse path
+    //   (lobster.translateBack(Glob.input) → {pattern: "..."} when lobster
+    //   wants {action: "run"}). Better to let the model not see those tools
+    //   than to pretend they exist and corrupt every call. Users needing
+    //   every client tool to actually work must use --preserve-tools.
     const CC_FALLBACK_TOOLS = ['Bash', 'Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch'];
     for (const tool of clientTools) {
       const name = (tool.name as string || '').toLowerCase();
       if (TOOL_MAP[name]) continue;
       unmappedTools.push(tool.name as string);
-      // Exclude CC tools the client already uses so we never create a
-      // two-client-names-to-one-CC-tool collision. If every fallback is
-      // claimed (rare: client already uses 6+ CC tools), fall back to the
-      // full pool and accept the ambiguity.
+      if (opts.hybridTools) continue; // dropped — see comment above
+      // Default mode: round-robin distribution. Exclude CC tools the client
+      // already uses so we never create a two-client-names-to-one-CC-tool
+      // collision. If every fallback is claimed (rare: client already uses 6+
+      // CC tools), fall back to the full pool and accept the ambiguity.
       const pool = CC_FALLBACK_TOOLS.filter(t => !claimedCC.has(t));
       const fallbackPool = pool.length > 0 ? pool : CC_FALLBACK_TOOLS;
       const fallbackTool = fallbackPool[(unmappedTools.length - 1) % fallbackPool.length];

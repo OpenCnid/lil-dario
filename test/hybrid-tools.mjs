@@ -227,6 +227,102 @@ header('6. Hybrid mode + streaming reverse mapper');
 }
 
 // ======================================================================
+//  dario#36 — exec/bash translateBack produces {command}, not {cmd}
+// ======================================================================
+//
+// OpenClaw's `exec` tool takes {command, workdir, env, ...}. Pre-fix,
+// TOOL_MAP.exec.translateBack emitted {cmd: ...} which left params.command
+// undefined on OpenClaw's side and threw "Provide a command to start."
+header('dario#36 — bash/exec reverse translation uses `command`');
+{
+  const body = {
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'run ls' }],
+    tools: [
+      {
+        name: 'exec',
+        description: 'Run a shell command',
+        input_schema: { type: 'object', properties: { command: { type: 'string' } } },
+      },
+    ],
+  };
+  const built = buildCCRequest(
+    JSON.parse(JSON.stringify(body)),
+    'billing',
+    { type: 'ephemeral', ttl: '1h' },
+    { deviceId: 'd', accountUuid: 'a', sessionId: 's' },
+    {},
+  );
+  const upstream = JSON.stringify({
+    content: [
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls -la /tmp' } },
+    ],
+  });
+  const remapped = JSON.parse(reverseMapResponse(upstream, built.toolMap));
+  const block = remapped.content[0];
+  check('exec block name is `exec` (not `Bash`)', block.name === 'exec');
+  check('exec block input has `command` (not `cmd`)', block.input.command === 'ls -la /tmp');
+  check('exec block input has NO `cmd` field (the pre-fix bug)', block.input.cmd === undefined);
+}
+
+// ======================================================================
+//  dario#36 — hybrid mode drops unmapped tools instead of round-robin
+// ======================================================================
+//
+// OpenClaw declares ~50 custom tools (lobster, memory_get, feishu_*, ...).
+// Pre-fix they got round-robin'd onto CC fallback tools, so calls returned
+// with Grep's input shape instead of lobster's action-discriminator shape
+// and threw "Unknown action". Fix: in hybrid mode, skip them entirely so
+// the model upstream never sees them and can't mis-call them.
+header('dario#36 — hybrid mode drops unmapped tools');
+{
+  const body = {
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'do something' }],
+    tools: [
+      {
+        name: 'bash',
+        description: 'shell',
+        input_schema: { type: 'object', properties: { command: { type: 'string' } } },
+      },
+      {
+        name: 'lobster',
+        description: 'task flow runner',
+        input_schema: { type: 'object', properties: { action: { type: 'string' }, taskId: { type: 'string' } } },
+      },
+      {
+        name: 'memory_get',
+        description: 'memory read',
+        input_schema: { type: 'object', properties: { path: { type: 'string' }, from: { type: 'number' } } },
+      },
+    ],
+  };
+  const hybrid = buildCCRequest(
+    JSON.parse(JSON.stringify(body)),
+    'billing',
+    { type: 'ephemeral', ttl: '1h' },
+    { deviceId: 'd', accountUuid: 'a', sessionId: 's' },
+    { hybridTools: true },
+  );
+  check('hybrid: unmappedTools reports lobster and memory_get', hybrid.unmappedTools.includes('lobster') && hybrid.unmappedTools.includes('memory_get'));
+  check('hybrid: lobster NOT in activeToolMap (dropped, not round-robin)', !hybrid.toolMap.has('lobster'));
+  check('hybrid: memory_get NOT in activeToolMap (dropped)', !hybrid.toolMap.has('memory_get'));
+  check('hybrid: bash still mapped (in TOOL_MAP)', hybrid.toolMap.has('bash'));
+
+  // Default mode preserves the old round-robin behavior so simple clients
+  // don't regress.
+  const defaultMode = buildCCRequest(
+    JSON.parse(JSON.stringify(body)),
+    'billing',
+    { type: 'ephemeral', ttl: '1h' },
+    { deviceId: 'd', accountUuid: 'a', sessionId: 's' },
+    {},
+  );
+  check('default mode: lobster IS round-robin mapped (old behavior preserved)', defaultMode.toolMap.has('lobster'));
+  check('default mode: memory_get IS round-robin mapped', defaultMode.toolMap.has('memory_get'));
+}
+
+// ======================================================================
 //  Summary
 // ======================================================================
 console.log(`\n${pass} pass, ${fail} fail`);
