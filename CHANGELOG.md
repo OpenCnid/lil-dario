@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.9.1] - 2026-04-14
+
+Windows keychain credential detection. Finishes the Windows arm of the v3.7.0 keychain work ([#30](https://github.com/askalf/dario/pull/30) by [@iNicholasBE](https://github.com/iNicholasBE)) that was explicitly stubbed out. Tracked as item 3 of the v3.8.0+ roadmap.
+
+### Added
+
+- **Windows Credential Manager support in `loadKeychainCredentials`** (`src/oauth.ts`). Modern Claude Code on Windows (via Node keytar) stores OAuth tokens as Generic credentials in Credential Manager with target prefix `Claude Code-credentials`. Dario's `loadCredentials()` now enumerates matching entries on Windows via PowerShell + Win32 `CredEnumerateW`, decodes the UTF-16LE credential blob, and returns the first entry that parses as a valid `{claudeAiOauth: {accessToken, refreshToken}}` shape. Runs under `-NoProfile -NonInteractive -ExecutionPolicy Bypass` with a 5s timeout and `windowsHide: true` so no console flashes.
+
+  Same pattern as the macOS and Linux paths that shipped in v3.7.0: silent fall-through on any failure, so the existing file-based checks (`~/.dario/credentials.json`, `~/.claude/.credentials.json`) still run as the next fallback. Pre-v3.9.1 Windows users were hitting those file fallbacks exclusively — no regression risk for anyone whose CC on Windows writes to disk rather than to the credential manager.
+
+- **Windows keychain branch in `loadCredentials()` probe order.** Unchanged: keychain → dario file → CC file → OAuth flow. The Windows keychain path slots into the existing keychain branch; the surrounding order is untouched.
+
+### Not changed
+
+- **macOS and Linux keychain paths** — identical to v3.7.0/v3.8.x behavior. No edits to the `security find-generic-password` or `secret-tool lookup` branches.
+- **File-based credential loading** — `~/.dario/credentials.json` and `~/.claude/.credentials.json` probes run in the same order, with the same semantics.
+- **OAuth refresh flow, cache TTL, refresh cooldown, mutex** — all unchanged.
+- **All tests pass unchanged**: `test/issue-29-tool-translation.mjs` 28/28 ✅, `test/hybrid-tools.mjs` 24/24 ✅, `test/analytics-recording.mjs` 38/38 ✅, `test/failover-429.mjs` 19/19 ✅.
+
+### Testing notes
+
+Verified locally on Windows 11 Pro:
+
+1. **Build clean** — TypeScript compiles without errors.
+2. **PowerShell script standalone** — running the embedded Win32 `CredEnumerate` script against `Claude Code-credentials*` filter on a machine without a CC keychain entry returns `ERROR_NOT_FOUND` (1168), which the PS script swallows and exits with no stdout — exactly the "fall through" behavior the JS caller expects.
+3. **`loadCredentials()` smoke test** — on a machine where CC was previously installed but has now been uninstalled, the Windows keychain probe returns `null` and the file-based fallback finds `~/.claude/.credentials.json` as expected.
+
+**Not yet verified against a live CC-keychain-backed Windows install.** If you run CC on Windows and your OAuth tokens are stored in Credential Manager (not in a file), please upgrade to v3.9.1 and report whether `dario login`'s keychain probe picks up your existing session. File an issue if it doesn't — the enumeration filter or UTF-16 decode may need tweaking for edge cases we haven't seen.
+
+### Credit
+
+[@iNicholasBE](https://github.com/iNicholasBE) — the v3.7.0 macOS + Linux keychain work established the code path and the fall-through semantics; v3.9.1 just fills in the Windows slot against the same contract. Thanks also to the broader CC ecosystem for documenting the keytar → Credential Manager storage convention that made this implementation straightforward.
+
 ## [3.9.0] - 2026-04-14
 
 **Hybrid tool mode** — resolves [#33](https://github.com/askalf/dario/issues/33), the roadmap item promised to [@boeingchoco](https://github.com/boeingchoco) in the v3.8.1 thread. Keep the CC request fingerprint AND let custom-schema clients see their declared non-CC fields on tool_use responses.

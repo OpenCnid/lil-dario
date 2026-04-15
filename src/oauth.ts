@@ -73,8 +73,48 @@ function getClaudeCodeCredentialsPath(): string {
  * store instead of ~/.claude/.credentials.json:
  *   - macOS: Keychain, service "Claude Code-credentials"
  *   - Linux: libsecret / Secret Service D-Bus API via `secret-tool`
- *   - Windows: Windows Credential Manager via `cmdkey` (not yet implemented)
+ *   - Windows: Windows Credential Manager via PowerShell + Win32 CredEnumerate
  */
+const WIN_CRED_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+$sig = @"
+using System;
+using System.Runtime.InteropServices;
+public class CM {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  public struct CRED {
+    public uint Flags; public uint Type; public string TargetName;
+    public string Comment; public System.Runtime.InteropServices.ComTypes.FILETIME LW;
+    public uint BlobSize; public IntPtr Blob;
+    public uint Persist; public uint AC; public IntPtr Attrs;
+    public string Alias; public string UN;
+  }
+  [DllImport("advapi32.dll", EntryPoint="CredEnumerateW", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool CredEnumerate(string filter, uint flag, out uint count, out IntPtr pCredentials);
+  [DllImport("advapi32.dll", EntryPoint="CredFree")]
+  public static extern void CredFree(IntPtr cred);
+}
+"@
+Add-Type -TypeDefinition $sig
+$count = 0
+$ptr = [IntPtr]::Zero
+if ([CM]::CredEnumerate('Claude Code-credentials*', 0, [ref]$count, [ref]$ptr)) {
+  try {
+    for ($i = 0; $i -lt $count; $i++) {
+      $credPtr = [System.Runtime.InteropServices.Marshal]::ReadIntPtr($ptr, $i * [IntPtr]::Size)
+      $cred = [System.Runtime.InteropServices.Marshal]::PtrToStructure($credPtr, [type][CM+CRED])
+      if ($cred.BlobSize -gt 0) {
+        $bytes = New-Object byte[] $cred.BlobSize
+        [System.Runtime.InteropServices.Marshal]::Copy($cred.Blob, $bytes, 0, $cred.BlobSize)
+        Write-Output ([System.Text.Encoding]::Unicode.GetString($bytes))
+      }
+    }
+  } finally {
+    [CM]::CredFree($ptr)
+  }
+}
+`;
+
 async function loadKeychainCredentials(): Promise<CredentialsFile | null> {
   try {
     if (platform() === 'darwin') {
@@ -102,6 +142,37 @@ async function loadKeychainCredentials(): Promise<CredentialsFile | null> {
       const parsed = JSON.parse(raw);
       if (parsed?.claudeAiOauth?.accessToken && parsed?.claudeAiOauth?.refreshToken) {
         return parsed as CredentialsFile;
+      }
+    } else if (platform() === 'win32') {
+      // Windows Credential Manager via PowerShell + Win32 CredEnumerate.
+      // Claude Code on Windows (via Node keytar) stores OAuth tokens as
+      // Generic credentials with target prefix "Claude Code-credentials".
+      // We enumerate matching credentials and return the first one that
+      // parses as a valid CC credentials blob. The password field is
+      // stored as UTF-16LE bytes (keytar convention on Windows).
+      //
+      // PowerShell CredEnumerate sets LastWin32Error=1168 (ERROR_NOT_FOUND)
+      // when the filter matches nothing — we catch the non-zero exit and
+      // return null so the caller falls back to the file-path checks.
+      const raw = await new Promise<string>((resolve, reject) => {
+        execFile(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', WIN_CRED_SCRIPT],
+          { timeout: 5000, windowsHide: true },
+          (err, stdout) => (err ? reject(err) : resolve(stdout)),
+        );
+      });
+      // Script emits one JSON blob per matching credential, newline-separated.
+      // Return the first one that parses with the expected CC shape.
+      for (const line of raw.split(/\r?\n/)) {
+        const s = line.trim();
+        if (!s) continue;
+        try {
+          const parsed = JSON.parse(s);
+          if (parsed?.claudeAiOauth?.accessToken && parsed?.claudeAiOauth?.refreshToken) {
+            return parsed as CredentialsFile;
+          }
+        } catch { /* not a valid JSON credential blob — try next */ }
       }
     }
   } catch { /* keychain not available or no entry */ }
