@@ -6,7 +6,24 @@
  * path it has always had; the pool only runs when there are multiple
  * accounts to distribute against.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+
+/**
+ * Compute a stable stickiness key from a conversation's first user
+ * message. Multi-turn agent sessions carry the same first user message
+ * on every turn, so hashing it gives a stable per-conversation key that
+ * doesn't require client cooperation. Empty / whitespace-only inputs
+ * return null so callers bypass stickiness on unhashable requests.
+ *
+ * Uses SHA-256 truncated to 16 hex chars (64 bits) — plenty of collision
+ * headroom for a pool of at most a few hundred active conversations per
+ * proxy instance, and small enough to log without spam.
+ */
+export function computeStickyKey(firstUserMessage: string | null | undefined): string | null {
+  const trimmed = (firstUserMessage ?? '').trim();
+  if (trimmed.length === 0) return null;
+  return createHash('sha256').update(trimmed).digest('hex').slice(0, 16);
+}
 
 export interface AccountIdentity {
   deviceId: string;
@@ -76,12 +93,37 @@ export function parseRateLimits(headers: Headers): RateLimitSnapshot {
   };
 }
 
+/**
+ * Session stickiness binding — ties a conversation key (derived from the
+ * first user message) to one account so multi-turn agent sessions don't
+ * rotate accounts mid-conversation and destroy the Anthropic prompt cache.
+ *
+ * Prompt cache on Claude Max is scoped to `{account × cache_control key}`.
+ * A conversation that hits account A on turn 1 builds a cache entry under
+ * account A. Turn 2 to account B reads nothing from A's cache and pays
+ * cache-create cost again. For a long agent session that's a 5–10× token
+ * cost multiplier on the cache-reused portion of every turn after the first.
+ *
+ * Stickiness: bind the conversation's stickyKey to an account for the life
+ * of that conversation, and fall off only when the bound account is
+ * exhausted / rejected. The 6-hour TTL matches the Max plan's five-hour
+ * rate-limit window plus a buffer — past that point a "same" conversation
+ * would be starting a fresh window anyway, so rebinding is free.
+ */
+interface StickyBinding {
+  alias: string;
+  boundAt: number;
+}
+const STICKY_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+const STICKY_MAX_ENTRIES = 2_000;          // lazy cleanup cap
+
 export class AccountPool {
   private accounts: Map<string, PoolAccount> = new Map();
   private queue: QueuedRequest[] = [];
   private queueMaxSize = 50;
   private queueTimeoutMs = 60_000;
   private drainTimer: ReturnType<typeof setInterval> | null = null;
+  private sticky: Map<string, StickyBinding> = new Map();
 
   add(alias: string, opts: {
     accessToken: string;
@@ -142,6 +184,88 @@ export class AccountPool {
 
     // No rate-limit data at all — least-used first
     return all.reduce((a, b) => a.requestCount < b.requestCount ? a : b);
+  }
+
+  /**
+   * Select with session stickiness. If `stickyKey` is already bound to a
+   * healthy account (not rejected, token not near expiry, headroom > 2%),
+   * return that account. Otherwise pick by headroom (`select()`) and
+   * rebind the key to the chosen account. Null key bypasses stickiness
+   * and delegates to `select()`.
+   *
+   * Rebinding also fires when the previously-bound account is marked
+   * rejected (429) or has its headroom drop below 2% — at that point the
+   * conversation's cache entry on the old account is effectively stranded
+   * until reset anyway, so there's no cost to moving. The new account
+   * starts building its own cache for this conversation from turn 1 of
+   * the rebind.
+   *
+   * Also performs lazy cleanup of expired bindings (TTL or size cap).
+   */
+  selectSticky(stickyKey: string | null): PoolAccount | null {
+    if (!stickyKey) return this.select();
+    this.cleanupSticky();
+
+    const binding = this.sticky.get(stickyKey);
+    if (binding) {
+      const bound = this.accounts.get(binding.alias);
+      const now = Date.now();
+      if (bound
+        && bound.rateLimit.status !== 'rejected'
+        && bound.expiresAt > now + 30_000
+        && (1 - Math.max(bound.rateLimit.util5h, bound.rateLimit.util7d)) > 0.02
+      ) {
+        return bound;
+      }
+    }
+
+    const picked = this.select();
+    if (picked) {
+      this.sticky.set(stickyKey, { alias: picked.alias, boundAt: Date.now() });
+    }
+    return picked;
+  }
+
+  /**
+   * Rebind a sticky key to a different account — called by proxy after an
+   * in-request 429 failover moves to the next-best account. Without this
+   * the next turn of the same conversation would re-select the exhausted
+   * account via the stale binding, eat another 429, and failover again.
+   */
+  rebindSticky(stickyKey: string | null, alias: string): void {
+    if (!stickyKey) return;
+    if (!this.accounts.has(alias)) return;
+    this.sticky.set(stickyKey, { alias, boundAt: Date.now() });
+  }
+
+  /**
+   * Drop any binding that points at an account no longer in the pool, any
+   * binding past the TTL, and if we're over the size cap drop the oldest
+   * entries until we're back under. O(n) but n is small (capped at 2k)
+   * and this only runs on selectSticky, not on every method.
+   */
+  private cleanupSticky(): void {
+    const now = Date.now();
+    for (const [key, b] of this.sticky) {
+      if (!this.accounts.has(b.alias) || now - b.boundAt > STICKY_TTL_MS) {
+        this.sticky.delete(key);
+      }
+    }
+    if (this.sticky.size > STICKY_MAX_ENTRIES) {
+      const sorted = [...this.sticky.entries()].sort((a, b) => a[1].boundAt - b[1].boundAt);
+      const toDrop = sorted.slice(0, this.sticky.size - STICKY_MAX_ENTRIES);
+      for (const [key] of toDrop) this.sticky.delete(key);
+    }
+  }
+
+  /** Test/inspection helper — number of live sticky bindings. */
+  stickyCount(): number {
+    return this.sticky.size;
+  }
+
+  /** Test/inspection helper — current alias bound to a key, or null. */
+  stickyAliasFor(stickyKey: string): string | null {
+    return this.sticky.get(stickyKey)?.alias ?? null;
   }
 
   /** Select the next-best account, excluding the given set of aliases. */

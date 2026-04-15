@@ -15,6 +15,74 @@
  * only runs long enough to capture a single request. CC's OAuth token
  * never leaves the machine — we send CC to a loopback URL that CC itself
  * trusts because we set ANTHROPIC_BASE_URL in the child's environment.
+ *
+ * --------------------------------------------------------------------
+ * "Hide in the population" roadmap (v3.13 → ?)
+ * --------------------------------------------------------------------
+ *
+ * The fingerprint pipeline has historically cared about one axis: what
+ * goes INSIDE the /v1/messages body (agent identity, system prompt, tool
+ * list). That's only one fingerprint vector. Anthropic can (and likely
+ * does) look at several others:
+ *
+ *   1. Header ORDER. Node's http module emits headers in alphabetical
+ *      order via setHeader(). Undici preserves insertion order. Real CC
+ *      uses undici with a specific insertion pattern. If dario sends
+ *      headers in a different order than CC, the difference is trivially
+ *      observable on the server side via the raw header array.
+ *      → Captured as `header_order` below. Outbound proxy paths should
+ *        use the captured order when rebuilding fetch() headers.
+ *
+ *   2. TLS ClientHello (JA3 / JA4 fingerprint). The cipher list, elliptic
+ *      curves, extension order, and ALPN negotiation are determined by
+ *      the TLS library, and Node's TLS (OpenSSL) produces a distinctive
+ *      fingerprint that differs from any browser or from curl. Real CC
+ *      running on top of Node has the Node JA3 — so we already match,
+ *      provided both run on the same Node major. A cross-runtime worry
+ *      surfaces when Anthropic ships Bun- or bundled-binary CC: at that
+ *      point Node-dario and Bun-CC would JA-differ.
+ *      → Mitigation: detect Bun-compiled CC, fall back to shim mode
+ *        (which patches fetch INSIDE the CC process, inheriting CC's
+ *        own TLS stack for free).
+ *
+ *   3. HTTP/2 frame ordering + SETTINGS parameters. Similar to TLS, this
+ *      is controlled by the HTTP library. Node and undici produce a
+ *      consistent H2 fingerprint. Matches as long as both ends run the
+ *      same library.
+ *
+ *   4. Request timing distribution. Real CC sends requests with jitter
+ *      driven by user typing, tool-call sequencing, and internal retry
+ *      logic. Dario-through-a-client sends requests with jitter driven
+ *      by WHATEVER client is on the other end (OpenClaw, Hermes, curl).
+ *      That distribution differs from CC's. Anthropic could pattern-match
+ *      "no inter-request jitter" as a fingerprint for automated usage.
+ *      → Deferred. Adds latency for debatable gain. Analytics already
+ *        tracks per-request timing — could drive a replay distribution
+ *        later.
+ *
+ *   5. sessionId rotation cadence. CC rotates its internal session id
+ *      on a specific cadence (observed: roughly once per conversation
+ *      start, not per-request). Dario today uses a static session id
+ *      from loadClaudeIdentity. A proxy that kept rotating sessionId
+ *      randomly would stand out; a proxy that never rotates also stands
+ *      out. Matching CC's cadence requires observing CC over a longer
+ *      period than a single capture session.
+ *      → Deferred. Requires a longer-running capture mode.
+ *
+ *   6. Request body field ordering. JSON is unordered, but the wire
+ *      serialization IS ordered. Real CC uses a specific field order
+ *      for /v1/messages (e.g., `model` before `messages` before
+ *      `system` before `tools`). A proxy that serializes in a different
+ *      order leaks its origin.
+ *      → Worth matching. Cheap to implement — the template capture
+ *        already produces a body we can walk to recover field order.
+ *        Deferred to a follow-up.
+ *
+ * The concrete v3.13 move is (1): capture header_order and make it
+ * available on the template so the outbound proxy paths can reproduce
+ * it. Everything else is documented here as a roadmap so the next
+ * contributor — or dario maintainer six months from now — can pick up
+ * the right piece without re-deriving the threat model.
  */
 
 import { spawn } from 'node:child_process';
@@ -34,6 +102,14 @@ export interface TemplateData {
   system_prompt: string;
   tools: Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
   tool_names: string[];
+  /**
+   * The exact order CC emitted HTTP headers in when it hit the capture
+   * endpoint. Lowercased. Populated only from live captures — bundled
+   * snapshots leave this undefined and callers fall back to their own
+   * default order. Used by outbound proxy paths to reproduce CC's
+   * header ordering instead of Node's alphabetical default.
+   */
+  header_order?: string[];
 }
 
 const LIVE_CACHE = join(homedir(), '.dario', 'cc-template.live.json');
@@ -134,6 +210,12 @@ interface CapturedRequest {
   method: string;
   path: string;
   headers: Record<string, string>;
+  /**
+   * The flat [k1, v1, k2, v2, ...] array exactly as Node exposes it via
+   * req.rawHeaders. Preserves insertion order and duplicates, which the
+   * flattened `headers` map does not. Used to recover CC's header order.
+   */
+  rawHeaders: string[];
   body: Record<string, unknown>;
 }
 
@@ -186,6 +268,7 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
             method: req.method ?? 'POST',
             path: req.url ?? '/v1/messages',
             headers,
+            rawHeaders: Array.isArray(req.rawHeaders) ? [...req.rawHeaders] : [],
             body,
           };
         } catch {
@@ -351,6 +434,7 @@ export function extractTemplate(captured: CapturedRequest): TemplateData | null 
   if (tools.length === 0) return null;
 
   const version = extractCCVersion(captured.headers) ?? 'unknown';
+  const headerOrder = extractHeaderOrder(captured.rawHeaders);
 
   return {
     _version: version,
@@ -360,7 +444,29 @@ export function extractTemplate(captured: CapturedRequest): TemplateData | null 
     system_prompt: systemPrompt,
     tools,
     tool_names: tools.map((t) => t.name),
+    header_order: headerOrder,
   };
+}
+
+/**
+ * Walk rawHeaders (flat [k1, v1, k2, v2, ...] array) and return the
+ * header names in insertion order, lowercased, de-duplicated. If the
+ * raw array is empty or unusable, returns undefined so the caller
+ * falls back to default ordering.
+ */
+function extractHeaderOrder(rawHeaders: string[]): string[] | undefined {
+  if (!Array.isArray(rawHeaders) || rawHeaders.length === 0) return undefined;
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < rawHeaders.length; i += 2) {
+    const name = rawHeaders[i];
+    if (typeof name !== 'string') continue;
+    const lower = name.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    order.push(lower);
+  }
+  return order.length > 0 ? order : undefined;
 }
 
 function pickTextBlock(block: unknown): string | null {

@@ -7,9 +7,16 @@ import { homedir } from 'node:os';
 import { arch, platform } from 'node:process';
 import { getAccessToken, getStatus } from './oauth.js';
 import { buildCCRequest, reverseMapResponse, createStreamingReverseMapper, type ToolMapping, type RequestContext } from './cc-template.js';
-import { AccountPool, parseRateLimits, type PoolAccount } from './pool.js';
+import { AccountPool, computeStickyKey, parseRateLimits, type PoolAccount } from './pool.js';
 import { Analytics, billingBucketFromClaim } from './analytics.js';
 import { loadAllAccounts, loadAccount, refreshAccountToken } from './accounts.js';
+import {
+  GroupLender,
+  importGroupPublicKey,
+  decodeBorrowEnvelope,
+  parseBorrowToken,
+  type ExportedGroupKey,
+} from './sealed-pool.js';
 import { getOpenAIBackend, isOpenAIModel, forwardToOpenAI, type BackendCredentials } from './openai-backend.js';
 
 const ANTHROPIC_API = 'https://api.anthropic.com';
@@ -383,6 +390,30 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const accountsList = await loadAllAccounts();
   const pool = accountsList.length >= 2 ? new AccountPool() : null;
   const analytics = pool ? new Analytics() : null;
+
+  // Sealed-sender overflow pool — activated when ~/.dario/group.json exists.
+  // Config format: { "groupId": "<name>", "publicKey": { n, e, modulusBytes } }
+  // where publicKey is the GroupAdmin's exported RSA public key. Lender runs
+  // in addition to normal pool mode — borrow requests go through a separate
+  // /v1/pool/borrow endpoint and are verified via the admin-signed token.
+  let groupLender: GroupLender | null = null;
+  try {
+    const groupConfigPath = join(homedir(), '.dario', 'group.json');
+    const rawGroup = readFileSync(groupConfigPath, 'utf-8');
+    const parsed = JSON.parse(rawGroup) as { groupId?: string; publicKey?: ExportedGroupKey };
+    if (parsed?.groupId && parsed.publicKey?.n && parsed.publicKey?.e && parsed.publicKey?.modulusBytes) {
+      const pub = importGroupPublicKey(parsed.publicKey);
+      groupLender = new GroupLender(parsed.groupId, pub);
+      console.log(`  Sealed-sender pool: group "${parsed.groupId}" loaded (${pub.modulusBytes * 8}-bit key)`);
+    }
+  } catch (err) {
+    // Group config is optional — silent fallthrough if missing. Log parse
+    // errors explicitly so a broken config doesn't fail silently.
+    const e = err as NodeJS.ErrnoException;
+    if (e.code && e.code !== 'ENOENT') {
+      console.warn(`[dario] group.json present but unusable: ${e.message}`);
+    }
+  }
   let status: Awaited<ReturnType<typeof getStatus>>;
   if (pool) {
     for (const acc of accountsList) {
@@ -541,6 +572,112 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       return;
     }
 
+    // Sealed-sender borrow endpoint — runs BEFORE the API-key auth check
+    // because the admin-signed group token IS the authentication. Anyone
+    // who presents a valid unused token can borrow capacity from this
+    // instance's pool without also holding the local dario API key.
+    // See src/sealed-pool.ts for the protocol.
+    if (urlPath === '/v1/pool/borrow' && req.method === 'POST') {
+      if (!groupLender) {
+        res.writeHead(503, JSON_HEADERS);
+        res.end(JSON.stringify({ error: 'sealed-sender pool not configured on this instance' }));
+        return;
+      }
+      if (!pool) {
+        res.writeHead(503, JSON_HEADERS);
+        res.end(JSON.stringify({ error: 'pool mode required for sealed-sender borrows' }));
+        return;
+      }
+
+      // Read body with the same limits as normal /v1/messages.
+      const bChunks: Buffer[] = [];
+      let bBytes = 0;
+      const bTimeout = setTimeout(() => { req.destroy(); }, BODY_READ_TIMEOUT_MS);
+      try {
+        for await (const chunk of req) {
+          const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+          bBytes += buf.length;
+          if (bBytes > MAX_BODY_BYTES) {
+            clearTimeout(bTimeout);
+            res.writeHead(413, JSON_HEADERS);
+            res.end(JSON.stringify({ error: 'Request body too large' }));
+            return;
+          }
+          bChunks.push(buf);
+        }
+      } finally {
+        clearTimeout(bTimeout);
+      }
+
+      const envelope = decodeBorrowEnvelope(Buffer.concat(bChunks).toString('utf-8'));
+      if (!envelope) {
+        res.writeHead(400, JSON_HEADERS);
+        res.end(JSON.stringify({ error: 'malformed borrow envelope' }));
+        return;
+      }
+      if (envelope.groupId !== groupLender.groupId) {
+        res.writeHead(403, JSON_HEADERS);
+        res.end(JSON.stringify({ error: 'unknown_group', expected: groupLender.groupId }));
+        return;
+      }
+      const borrowTok = parseBorrowToken(envelope);
+      if (!borrowTok) {
+        res.writeHead(400, JSON_HEADERS);
+        res.end(JSON.stringify({ error: 'malformed token' }));
+        return;
+      }
+      const accept = groupLender.acceptBorrow(borrowTok.token, borrowTok.signature);
+      if (!accept.ok) {
+        res.writeHead(403, JSON_HEADERS);
+        res.end(JSON.stringify({ error: 'borrow_rejected', reason: accept.reason }));
+        return;
+      }
+
+      // Token validated. Forward the embedded /v1/messages request to
+      // Anthropic using the lender's normal pool. This path is minimal:
+      // no streaming parser, no reverse tool mapping, no 429 failover.
+      // It's enough to demonstrate sealed-sender end-to-end; the full
+      // feature-parity wire-up with the main /v1/messages path is a
+      // separate change (requires threading a pre-read body through
+      // the existing handler).
+      const lenderAccount = pool.select();
+      if (!lenderAccount) {
+        res.writeHead(503, JSON_HEADERS);
+        res.end(JSON.stringify({ error: 'lender pool exhausted' }));
+        return;
+      }
+
+      try {
+        const upstream = await fetch(`${ANTHROPIC_API}/v1/messages?beta=true`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'authorization': `Bearer ${lenderAccount.accessToken}`,
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': 'claude-code-20250219',
+          },
+          body: JSON.stringify(envelope.request),
+        });
+        const snapshot = parseRateLimits(upstream.headers);
+        pool.updateRateLimits(lenderAccount.alias, snapshot);
+
+        const body = Buffer.from(await upstream.arrayBuffer());
+        res.writeHead(upstream.status, {
+          'content-type': upstream.headers.get('content-type') ?? 'application/json',
+          'Access-Control-Allow-Origin': corsOrigin,
+          ...SECURITY_HEADERS,
+        });
+        res.end(body);
+        if (verbose) {
+          console.log(`[dario] borrow: group=${envelope.groupId} → ${lenderAccount.alias} (${upstream.status}, ${body.length}B)`);
+        }
+      } catch (err) {
+        res.writeHead(502, JSON_HEADERS);
+        res.end(JSON.stringify({ error: 'upstream_error', message: (err as Error).message }));
+      }
+      return;
+    }
+
     if (!checkAuth(req)) { res.writeHead(401, JSON_HEADERS); res.end(ERR_UNAUTH); return; }
 
     // Status endpoint
@@ -570,7 +707,16 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         expiresInMs: Math.max(0, a.expiresAt - Date.now()),
       }));
       res.writeHead(200, JSON_HEADERS);
-      res.end(JSON.stringify({ mode: 'pool', ...pool.status(), accounts }));
+      res.end(JSON.stringify({
+        mode: 'pool',
+        ...pool.status(),
+        stickyBindings: pool.stickyCount(),
+        sealedSender: groupLender ? {
+          groupId: groupLender.groupId,
+          seenTokens: groupLender.seenCount(),
+        } : null,
+        accounts,
+      }));
       return;
     }
 
@@ -705,6 +851,16 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       let finalBody: Buffer | undefined = body.length > 0 ? body : undefined;
       let ccToolMap: Map<string, ToolMapping> | null = null;
       let requestModel = '';
+      // Session stickiness key — hash of the first user message in this
+      // conversation. Populated inside the template-replay block below
+      // after the first user message is extracted for the build tag, then
+      // used to rebind the sticky slot on in-request 429 failover and on
+      // the eventual request bookkeeping. Null when body isn't JSON, when
+      // there's no user message, or when we're in passthrough mode (the
+      // fingerprint work doesn't run, so there's no point biasing account
+      // selection toward one we already paid cache cost on — passthrough
+      // users aren't doing template replay anyway).
+      let stickyKey: string | null = null;
       // Request context for hybrid-mode field injection (#33). Built once
       // per request from incoming headers so the reverse mapper can fill
       // client-declared fields like `sessionId` that CC's schema doesn't
@@ -740,6 +896,25 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             const fullVersion = `${cliVersion}.${buildTag}`;
             const billingTag = `x-anthropic-billing-header: cc_version=${fullVersion}; cc_entrypoint=cli; cch=${cch};`;
             const CACHE_1H = { type: 'ephemeral' as const, ttl: '1h' as const };
+
+            // Session stickiness: rebind the pre-selected pool account to
+            // whatever the sticky-key resolver picks. If this is a new
+            // conversation the key binds to the current best account
+            // (no-op swap in most cases). If this is a follow-up turn of
+            // an existing conversation the key resolves to the account
+            // that already has the Anthropic prompt cache warmed for it.
+            // Rotating off mid-session costs cache-create on every turn.
+            stickyKey = computeStickyKey(userMsg);
+            if (pool && stickyKey) {
+              const preferred = pool.selectSticky(stickyKey);
+              if (preferred && preferred.alias !== poolAccount?.alias) {
+                poolAccount = preferred;
+                accessToken = preferred.accessToken;
+                if (verbose) {
+                  console.log(`[dario] #${requestCount} sticky: bind ${stickyKey} → ${preferred.alias}`);
+                }
+              }
+            }
 
             const bodyIdentity = poolAccount
               ? poolAccount.identity
@@ -924,6 +1099,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               accessToken = nextAccount.accessToken;
               headers['Authorization'] = `Bearer ${accessToken}`;
               headers['x-claude-code-session-id'] = nextAccount.identity.sessionId;
+              pool.rebindSticky(stickyKey, nextAccount.alias);
               peekedBody = null;
               continue dispatchLoop;
             }
@@ -981,6 +1157,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             accessToken = nextAccount.accessToken;
             headers['Authorization'] = `Bearer ${accessToken}`;
             headers['x-claude-code-session-id'] = nextAccount.identity.sessionId;
+            pool.rebindSticky(stickyKey, nextAccount.alias);
             continue dispatchLoop;
           }
         }

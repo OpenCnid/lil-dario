@@ -157,6 +157,77 @@ header('extractTemplate — returns null on malformed request bodies');
 }
 
 // ======================================================================
+//  extractTemplate — captures header order from rawHeaders (v3.13, option 2)
+// ======================================================================
+header('extractTemplate — header_order captured from rawHeaders');
+{
+  // rawHeaders is Node's flat [k1, v1, k2, v2, ...] representation. Node
+  // preserves insertion order here, so we can recover CC's exact header
+  // order from the capture without relying on flattened key/value maps.
+  const captured = {
+    method: 'POST',
+    path: '/v1/messages',
+    headers: {
+      'host': 'api.anthropic.com',
+      'user-agent': 'claude-cli/2.1.300 (external, cli)',
+      'content-type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      'authorization': 'Bearer redacted',
+    },
+    rawHeaders: [
+      'Host', 'api.anthropic.com',
+      'User-Agent', 'claude-cli/2.1.300 (external, cli)',
+      'Content-Type', 'application/json',
+      'anthropic-version', '2023-06-01',
+      'Authorization', 'Bearer redacted',
+      // Duplicate header should be de-duped, preserving first occurrence.
+      'User-Agent', 'this second value gets dropped',
+    ],
+    body: {
+      system: [
+        { type: 'text', text: 'tag' },
+        { type: 'text', text: 'agent identity' },
+        { type: 'text', text: 'system prompt body' },
+      ],
+      tools: [{ name: 'Bash', description: '', input_schema: {} }],
+    },
+  };
+
+  const t = _extractTemplateForTest(captured);
+  check('header_order captured', Array.isArray(t?.header_order));
+  check('header_order has 5 entries (dup dropped)', t?.header_order?.length === 5);
+  check('header_order[0] = host', t?.header_order?.[0] === 'host');
+  check('header_order[1] = user-agent', t?.header_order?.[1] === 'user-agent');
+  check('header_order[2] = content-type', t?.header_order?.[2] === 'content-type');
+  check('header_order preserves exact insertion sequence',
+    JSON.stringify(t?.header_order) ===
+    JSON.stringify(['host', 'user-agent', 'content-type', 'anthropic-version', 'authorization']));
+}
+
+header('extractTemplate — header_order omitted when rawHeaders missing');
+{
+  // Old synthetic captures (and the existing test fixtures above) don't
+  // pass rawHeaders at all. header_order should be undefined in that case
+  // so the outbound paths fall through to default ordering.
+  const captured = {
+    method: 'POST',
+    path: '/v1/messages',
+    headers: { 'user-agent': 'claude-cli/2.1.300' },
+    rawHeaders: [],
+    body: {
+      system: [
+        { type: 'text', text: 'tag' },
+        { type: 'text', text: 'agent' },
+        { type: 'text', text: 'prompt' },
+      ],
+      tools: [{ name: 'Bash', description: '', input_schema: {} }],
+    },
+  };
+  const t = _extractTemplateForTest(captured);
+  check('header_order undefined when rawHeaders empty', t?.header_order === undefined);
+}
+
+// ======================================================================
 //  loadTemplate — prefers live cache when fresh
 // ======================================================================
 header('loadTemplate — reads fresh live cache in preference to bundled');
