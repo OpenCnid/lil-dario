@@ -391,6 +391,8 @@ async function help() {
     --model=MODEL            Force a model for all requests
                              Shortcuts: opus, sonnet, haiku
                              Full IDs: claude-opus-4-6, claude-sonnet-4-6
+                             Provider prefix: openai:gpt-4o, groq:llama-3.3-70b,
+                             claude:opus, local:qwen-coder (forces backend)
                              Default: passthrough (client decides)
     --passthrough, --thin    Thin proxy — OAuth swap only, no injection
     --preserve-tools         Forward client tool schemas unchanged

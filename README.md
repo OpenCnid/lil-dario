@@ -26,11 +26,13 @@
 
 Dario runs on your machine and gives every tool you use one local URL that reaches **every LLM you use.** Point Cursor, Continue, Aider, LiteLLM, your own scripts — anything that speaks the Anthropic or OpenAI API — at `http://localhost:3456`, and dario routes each request to the right backend:
 
-- **Claude Max / Pro subscriptions** — OAuth-backed, billed against your plan instead of API pricing. Multi-account pooling if you have more than one.
 - **OpenAI** — your API key, routed to `api.openai.com` straight through.
 - **Any OpenAI-compat endpoint** — OpenRouter, Groq, a local LiteLLM, Ollama's openai-compat mode, self-hosted vLLM. Set the backend's `baseUrl` once, done.
+- **Claude Max / Pro subscriptions** — OAuth-backed, billed against your plan instead of API pricing. Multi-account pooling if you have more than one.
 
-Your tool sees one base URL. `gpt-4` goes to OpenAI. `claude-opus-4-6` goes to your Claude subscription. `llama-3-70b` goes to Groq. None of your tools have to know about any of it.
+Your tool sees one base URL. `gpt-4o` goes to OpenAI. `llama-3-70b` goes to Groq. `claude-opus-4-6` goes to your Claude subscription. None of your tools have to know about any of it.
+
+**Backends are plugins, not the product.** Dario's job is the one local endpoint your tools point at. Each backend is a swappable adapter behind it — when a provider ships, a backend entry lands, your tools don't change. That's the durable part.
 
 **No account anywhere is required.** Single-backend Claude dario works with nothing but `dario login`. Multi-backend dario works with nothing but local config files. Nothing phones home. Zero runtime dependencies. ~2,000 lines of TypeScript.
 
@@ -41,8 +43,9 @@ Your tool sees one base URL. `gpt-4` goes to OpenAI. `claude-opus-4-6` goes to y
 **Best fit:**
 
 - **Developers using multiple LLMs across multiple tools** who are tired of juggling base URLs, API keys, and per-tool provider configs.
-- **Claude Max or Pro subscribers** who want their subscription usable anywhere that speaks the Anthropic or OpenAI API — without paying API rates for every request.
 - **Teams running local or hosted OpenAI-compat servers** (LiteLLM, vLLM, Ollama, Groq, OpenRouter) who want one stable local endpoint in front of them that every tool can reuse.
+- **Anyone who wants to switch providers without reconfiguring every tool** — change the model name in your tool, dario picks a different backend, your tool keeps working.
+- **Claude Max or Pro subscribers** who want their subscription usable anywhere that speaks the Anthropic or OpenAI API — without paying API rates for every request.
 - **Power users running multi-agent workloads on Claude subscriptions** who want multi-account pooling with headroom-aware routing on their own machine, against their own subscriptions, without a hosted platform.
 
 **Not a fit:**
@@ -94,6 +97,8 @@ One URL. Your tool doesn't know or care which provider is answering.
 
 **Use dario if** you use more than one LLM provider, or more than one tool, or both — and you're tired of configuring each tool with a different base URL and API key per provider.
 
+**Use dario if** you want provider independence. Switching from GPT-4o to Claude to Llama is a model-name change in your tool, not a reconfigure of every SDK and base URL you've got.
+
 **Use dario if** you pay for Claude Max or Pro and you want that subscription reachable from every tool on your machine, without paying API rates or opening a second billing surface.
 
 **Use dario pool mode if** you're running multi-agent workloads on Claude subscriptions and hitting per-account rate limits. Add 2–N accounts with `dario accounts add` and dario routes across them by per-account headroom, all on your machine, against your own subscriptions. See [Multi-Account Pool Mode](#multi-account-pool-mode).
@@ -133,7 +138,7 @@ Opus, Sonnet, Haiku, GPT-4o, o1, o3, o4, plus anything the configured OpenAI-com
 
 ## Backends
 
-Dario's routing is organized around **backends**, each with its own auth and its own target. v3.6.0 ships two backends, with more coming.
+Dario's routing is organized around **backends**, each with its own auth and its own target. Backends are swappable adapters — add one, your tools reach it at `localhost:3456` with whatever API shape they already speak. v3.6.0 ships two backends, with more coming.
 
 ### 1. Claude subscription backend (built in)
 
@@ -247,7 +252,7 @@ curl http://localhost:3456/analytics    # per-account / per-model stats, burn ra
 | `--passthrough` / `--thin` | Thin proxy for the Claude backend — OAuth swap only, no template injection | off |
 | `--preserve-tools` / `--keep-tools` | Keep client tool schemas instead of remapping to CC's `Bash/Read/Grep/Glob/WebSearch/WebFetch`. Required for clients whose tools have fields CC doesn't (`sessionId`, custom ids, etc.) — see [Custom tool schemas](#custom-tool-schemas). Trade-off: drops the CC request fingerprint. | off |
 | `--hybrid-tools` / `--context-inject` | Remap to CC tools **and** inject request-context values (`sessionId`, `requestId`, `channelId`, `userId`, `timestamp`) into client-declared fields CC's schema doesn't carry. Preserves the CC fingerprint while keeping custom schemas functional — see [Hybrid tool mode](#hybrid-tool-mode). Mutually exclusive with `--preserve-tools`. | off |
-| `--model=<name>` | Force a model (`opus`, `sonnet`, `haiku`, or full ID). Applies to the Claude backend. | passthrough |
+| `--model=<name>` | Force a model. Shortcuts (`opus`, `sonnet`, `haiku`), full IDs (`claude-opus-4-6`), or a **provider prefix** (`openai:gpt-4o`, `groq:llama-3.3-70b`, `claude:opus`, `local:qwen-coder`) to force the backend server-wide. See [Provider prefix](#provider-prefix). | passthrough |
 | `--port=<n>` | Port to listen on | `3456` |
 | `--host=<addr>` / `DARIO_HOST` | Bind address. Use `0.0.0.0` for LAN, or a specific IP (e.g. a Tailscale interface). When non-loopback, also set `DARIO_API_KEY`. | `127.0.0.1` |
 | `--verbose` / `-v` | Log every request | off |
@@ -347,6 +352,44 @@ curl http://localhost:3456/v1/chat/completions \
 ### Streaming, tool use, prompt caching, extended thinking
 
 All supported. Claude backend: full Anthropic SSE format plus OpenAI-SSE translation for tool_use streaming. OpenAI-compat backend: streaming body forwarded byte-for-byte.
+
+### Provider prefix
+
+Any request's `model` field can be written as `<provider>:<name>` to force which backend handles it, regardless of what the model name looks like. This is useful when regex-based routing (`gpt-*` → OpenAI, `claude-*` → Claude) doesn't match — for example when routing a `llama-3.3-70b` request through an OpenAI-compat backend, or when you want the same model name to go to different providers on different requests.
+
+Recognized prefixes:
+
+| Prefix | Backend |
+|---|---|
+| `openai:` | OpenAI-compat backend (the configured one) |
+| `groq:` | OpenAI-compat backend |
+| `openrouter:` | OpenAI-compat backend |
+| `local:` | OpenAI-compat backend |
+| `compat:` | OpenAI-compat backend |
+| `claude:` | Claude subscription backend |
+| `anthropic:` | Claude subscription backend |
+
+Examples:
+
+```bash
+# Force openai backend
+curl http://localhost:3456/v1/chat/completions \
+  -H "Authorization: Bearer dario" \
+  -d '{"model":"openai:gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+
+# Force a non-gpt model through the openai-compat backend (e.g. OpenRouter)
+curl http://localhost:3456/v1/chat/completions \
+  -H "Authorization: Bearer dario" \
+  -d '{"model":"openrouter:meta-llama/llama-3.1-70b-instruct","messages":[...]}'
+
+# Force Claude subscription backend — same as `opus` shortcut but explicit
+curl http://localhost:3456/v1/messages \
+  -d '{"model":"claude:opus","max_tokens":1024,"messages":[...]}'
+```
+
+The prefix gets stripped before the request goes upstream — the backend only sees the bare model name. Unrecognized prefixes are ignored, so ollama-style `llama3:8b` passes through untouched.
+
+**Server-wide override.** `dario proxy --model=openai:gpt-4o` applies the prefix to every request, regardless of what the client sends. Useful for "I want everything routed to this specific backend and model" without editing every tool's config.
 
 ### Custom tool schemas
 

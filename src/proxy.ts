@@ -132,6 +132,32 @@ const MODEL_ALIASES: Record<string, string> = {
   'haiku': 'claude-haiku-4-5',
 };
 
+// Provider prefix in the `model` field — `<provider>:<model>`. Forces
+// routing regardless of model-name regex. Only recognized prefixes are
+// parsed, so ollama-style `llama3:8b` (without a recognized prefix)
+// passes through untouched and reaches the configured openai-compat
+// backend as-is.
+const PROVIDER_PREFIXES: Record<string, 'openai' | 'claude'> = {
+  openai: 'openai',
+  openrouter: 'openai',
+  groq: 'openai',
+  compat: 'openai',
+  local: 'openai',
+  claude: 'claude',
+  anthropic: 'claude',
+};
+
+export function parseProviderPrefix(model: string): { provider: 'openai' | 'claude'; model: string } | null {
+  const idx = model.indexOf(':');
+  if (idx <= 0) return null;
+  const prefix = model.slice(0, idx).toLowerCase();
+  const provider = PROVIDER_PREFIXES[prefix];
+  if (!provider) return null;
+  const stripped = model.slice(idx + 1);
+  if (!stripped) return null;
+  return { provider, model: stripped };
+}
+
 // Beta prefixes that require Extra Usage to be ENABLED on the account.
 // context-management and prompt-caching-scope are safe — billing is determined
 // solely by the OAuth token's subscription type, not by beta flags.
@@ -405,7 +431,13 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   }
 
   const cliVersion = detectCliVersion();
-  const modelOverride = opts.model ? (MODEL_ALIASES[opts.model] ?? opts.model) : null;
+  // Parse --model once at startup. Supports `<provider>:<model>` to force
+  // a backend for every request (e.g. `--model=openai:gpt-4o`). Back-compat:
+  // bare names like `opus` resolve via MODEL_ALIASES.
+  const modelPrefix = opts.model ? parseProviderPrefix(opts.model) : null;
+  const cliModelRaw = modelPrefix ? modelPrefix.model : opts.model;
+  const cliProviderOverride: 'openai' | 'claude' | null = modelPrefix ? modelPrefix.provider : null;
+  const modelOverride = cliModelRaw ? (MODEL_ALIASES[cliModelRaw] ?? cliModelRaw) : null;
   const identity = loadClaudeIdentity();
   if (identity.deviceId) {
     console.log('  Device identity: detected');
@@ -615,19 +647,47 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       } finally {
         clearTimeout(bodyTimeout);
       }
-      const body = Buffer.concat(chunks);
+      let body = Buffer.concat(chunks);
+
+      // Provider prefix (v3.10.0). If the body's model field is `<provider>:<model>`
+      // with a recognized prefix, strip the prefix and force routing regardless of
+      // regex. CLI-level `--model=<provider>:<name>` applies the same override
+      // server-wide. Rewrites the body in place once so both code paths below
+      // see the stripped model name.
+      let forcedProvider: 'openai' | 'claude' | null = cliProviderOverride;
+      if (body.length > 0) {
+        try {
+          const parsed = JSON.parse(body.toString()) as Record<string, unknown>;
+          const rawModel = (parsed.model as string | undefined) ?? '';
+          const prefix = parseProviderPrefix(rawModel);
+          if (prefix) {
+            forcedProvider = prefix.provider;
+            parsed.model = prefix.model;
+            body = Buffer.from(JSON.stringify(parsed));
+            if (verbose) {
+              console.log(`[dario] provider prefix: ${rawModel} → ${prefix.provider} backend with model ${prefix.model}`);
+            }
+          } else if (cliProviderOverride === 'openai' && cliModelRaw) {
+            // --model=openai:<name> forces the openai backend and replaces
+            // the model name server-wide. Body gets rewritten so the openai
+            // route below sees the CLI-chosen model.
+            parsed.model = cliModelRaw;
+            body = Buffer.from(JSON.stringify(parsed));
+          }
+        } catch { /* not JSON — fall through */ }
+      }
 
       // Multi-provider routing (v3.6.0+). When an OpenAI-compat backend is
       // configured and the request is on /v1/chat/completions with a
-      // GPT-family model, forward it straight through to the backend
-      // instead of running it through the Claude template path. Requests
-      // on /v1/messages or with Claude-family models fall through to
-      // existing behavior.
-      if (openaiBackend && isOpenAI && body.length > 0) {
+      // GPT-family model (or a forced `openai:` prefix), forward it straight
+      // through to the backend instead of running it through the Claude
+      // template path. Requests on /v1/messages or with Claude-family models
+      // fall through to existing behavior.
+      if (openaiBackend && isOpenAI && forcedProvider !== 'claude' && body.length > 0) {
         try {
           const peek = JSON.parse(body.toString()) as { model?: string };
           const rawModel = (peek.model || '').toString();
-          if (rawModel && isOpenAIModel(rawModel)) {
+          if (rawModel && (forcedProvider === 'openai' || isOpenAIModel(rawModel))) {
             if (verbose) {
               console.log(`[dario] #${requestCount} ${req.method} ${urlPath} (model: ${rawModel}) → openai backend`);
             }

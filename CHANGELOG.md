@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.10.0] - 2026-04-14
+
+Repositioning + new routing primitive. No bug fixes, no breaking changes.
+
+### Added
+
+- **Provider prefix in `model` field** (`src/proxy.ts`). Requests can now use `<provider>:<model>` in the `model` field to force backend routing regardless of model-name regex. Recognized prefixes: `openai:`, `groq:`, `openrouter:`, `local:`, `compat:`, `claude:`, `anthropic:`. The prefix is stripped before the request goes upstream — the backend sees the bare model name.
+
+  Example: `openai:gpt-4o` forces the OpenAI-compat backend; `openrouter:meta-llama/llama-3.1-70b` routes a non-GPT model through the OpenAI-compat backend without modifying the default regex; `claude:opus` explicitly forces the Claude subscription backend.
+
+  Ollama-style names like `llama3:8b` (colon used for tag, not provider prefix) pass through untouched — only recognized prefixes are parsed.
+
+- **`--model` accepts provider prefix** (`src/cli.ts`, `src/proxy.ts`). `dario proxy --model=openai:gpt-4o` applies the prefix to every request server-wide. Useful for one-flag routing override without editing every tool's config. Back-compat: `--model=opus` and full Claude IDs still work as before.
+
+- **`test/provider-prefix.mjs`** — 16 assertions covering prefix detection, stripping, ollama compat, edge cases (empty, uppercase, unknown providers), and path-containing model names (`openrouter:meta-llama/llama-3.1-70b`).
+
+### Changed
+
+- **README repositioned as multi-backend gateway.** The framing shift: dario is a local endpoint your tools point at; backends are swappable adapters behind it. Claude subscription remains the most sophisticated backend (template replay, fingerprint, pool mode), but is now presented as one of several, not the headline identity. Bullet order in "What it is" now leads with OpenAI / OpenAI-compat and places the subscription backend third. "Who this is for" gains a provider-independence audience. "Why switch" gains a provider-independence paragraph. The durable proposition — "your tools point at one URL, backends swap underneath, nothing in your tools changes" — is now the top-line pitch.
+
+### Why this release
+
+A response to the obvious trajectory: Anthropic will keep tightening subscription-shaped routing, and every tightening becomes a dario issue. Provider prefix + gateway framing is the first step toward making dario useful even in a future where the Claude subscription backend degrades. Users with an OpenAI key, a Groq key, a local LiteLLM, or any other OpenAI-compat endpoint get one stable local URL and can route between them with a model-name change. Claude subscription remains fully supported and will continue to get bug fixes — it's just no longer the sole story.
+
+---
+
 ## [3.9.6] - 2026-04-14
 
 Fixes [#37](https://github.com/askalf/dario/issues/37) reported by [@tetsuco](https://github.com/tetsuco) on v3.9.3. The `Read`-on-directory symptom from #35 was fixed in v3.9.3, but two related symptoms (`Bash → Unknown action`, `Glob → image handler misroute`) remained under OpenClaw. v3.9.5 resolved the Glob misroute (hybrid mode now drops unmapped tools like `image`). This release resolves the Bash collision.
