@@ -1035,13 +1035,33 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
 
       requestCount++;
 
-      // Log billing classification on first request or in verbose mode
+      // Log billing classification on first request or in verbose mode.
+      //
+      // Anthropic is inconsistent about returning rate-limit headers:
+      // - Non-200 responses (429, 500, early aborts) often omit them entirely.
+      // - The overage-utilization header is omitted when there is no overage
+      //   bucket configured or when the subscription claim covers the request
+      //   — in that case "overage" is effectively 0%, not unknown.
+      // Pre-fix we logged `overage: ?` on every five_hour request that had no
+      // overage configured, which looked like a broken parser (see #37 log
+      // dump). Fix: treat missing overage header as 0% when the claim is
+      // five_hour / five_hour_fallback (the subscription covered it), and fall
+      // back to `n/a` in the genuinely-unknown case.
       const billingClaim = upstream.headers.get('anthropic-ratelimit-unified-representative-claim');
       const overageUtil = upstream.headers.get('anthropic-ratelimit-unified-overage-utilization');
       if (requestCount === 1 || verbose) {
         if (billingClaim) {
-          const overagePct = overageUtil ? `${Math.round(parseFloat(overageUtil) * 100)}%` : '?';
+          let overagePct: string;
+          if (overageUtil !== null) {
+            overagePct = `${Math.round(parseFloat(overageUtil) * 100)}%`;
+          } else if (billingClaim === 'five_hour' || billingClaim === 'five_hour_fallback') {
+            overagePct = '0%';
+          } else {
+            overagePct = 'n/a';
+          }
           console.log(`[dario] #${requestCount} billing: ${billingClaim} (overage: ${overagePct})`);
+        } else if (verbose) {
+          console.log(`[dario] #${requestCount} billing: headers absent (status=${upstream.status})`);
         }
       }
 

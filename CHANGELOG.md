@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.10.3] - 2026-04-15
+
+### Fixed
+
+- **`billing: five_hour (overage: ?)` log spam** (`src/proxy.ts`, follow-up to #37). Anthropic omits the `anthropic-ratelimit-unified-overage-utilization` header when the subscription claim fully covered the request and no overage bucket was consumed. Pre-fix, dario treated the missing header as an unparseable value and printed `?`, which looked like a broken parser even though routing was working correctly — every request in @tetsuco's #37 log dump showed `overage: ?` despite the `five_hour` claim being correct.
+
+  Fix: when the overage header is absent and the claim is `five_hour` (or `five_hour_fallback`), display `0%` instead of `?` — the subscription covered the request, so overage consumption is zero by definition. If headers are missing entirely (non-200 responses, server errors), verbose mode now logs `billing: headers absent (status=N)` so the gap in the request numbering is explained instead of silent.
+
+---
+
 ## [3.10.2] - 2026-04-15
 
 ### Fixed
