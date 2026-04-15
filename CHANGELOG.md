@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.11.1] - 2026-04-15
+
+### Added — Billing bucket visibility (#34)
+
+- **`src/analytics.ts`** — new `BillingBucket` type and `billingBucketFromClaim()` pure helper that maps the raw `anthropic-ratelimit-unified-representative-claim` header value (`five_hour`, `five_hour_fallback`, `overage`, `api`) to a user-friendly bucket (`subscription`, `subscription_fallback`, `extra_usage`, `api`, `unknown`). `Analytics.computeStats()` now produces `billingBucketBreakdown` (per-bucket counts) and `subscriptionPercent` (share of *classified* requests that hit a subscription bucket — the headline "is dario actually routing me through my subscription?" number) on every `/analytics` summary.
+- **`src/proxy.ts`** — the per-request billing log line now leads with the friendly bucket: `billing: subscription (five_hour, overage: 0%)` instead of forcing users to memorize that `five_hour` means subscription. The raw claim is still shown in parentheses for parity with the underlying header.
+- **`test/analytics-billing-bucket.mjs`** — 23 assertions covering pure derivation across every enum value (including `null`/`undefined`/garbage → `unknown`), mixed-bucket aggregation (8 subscription + 1 extra_usage + 1 unknown → `subscriptionPercent ≈ 88.89%`), the clean 100% case, the @mikelovatt silent-drain scenario from #34 (10 `overage` requests → `subscriptionPercent === 0`, the alarm), and empty-state divide-by-zero safety.
+
+### Why this release
+
+Closes #34. The original #31 work added the raw `claim` header to logs and analytics, but users still had to know that `five_hour` = subscription and `overage` = paying out of pocket. @mikelovatt's complaint was that dario *appeared* to be routing through his subscription while extra_usage was silently burning his real balance — `subscriptionPercent < 100%` is now a one-glance answer to that question, surfaced in `/analytics` and in the per-request log line.
+
+---
+
 ## [3.11.0] - 2026-04-15
 
 ### Added — Live fingerprint extraction

@@ -8,7 +8,7 @@ import { arch, platform } from 'node:process';
 import { getAccessToken, getStatus } from './oauth.js';
 import { buildCCRequest, reverseMapResponse, createStreamingReverseMapper, type ToolMapping, type RequestContext } from './cc-template.js';
 import { AccountPool, parseRateLimits, type PoolAccount } from './pool.js';
-import { Analytics } from './analytics.js';
+import { Analytics, billingBucketFromClaim } from './analytics.js';
 import { loadAllAccounts, loadAccount, refreshAccountToken } from './accounts.js';
 import { getOpenAIBackend, isOpenAIModel, forwardToOpenAI, type BackendCredentials } from './openai-backend.js';
 
@@ -1059,7 +1059,13 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           } else {
             overagePct = 'n/a';
           }
-          console.log(`[dario] #${requestCount} billing: ${billingClaim} (overage: ${overagePct})`);
+          // Show the derived billing bucket as the headline, with the raw
+          // claim value in parens so power users still see the header as-is.
+          // See #34 — users want "am I actually on subscription?" answered
+          // at a glance instead of having to memorize that `five_hour` means
+          // "yes, subscription."
+          const bucket = billingBucketFromClaim(billingClaim);
+          console.log(`[dario] #${requestCount} billing: ${bucket} (${billingClaim}, overage: ${overagePct})`);
         } else if (verbose) {
           console.log(`[dario] #${requestCount} billing: headers absent (status=${upstream.status})`);
         }

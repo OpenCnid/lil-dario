@@ -25,6 +25,46 @@ export interface RequestRecord {
   isOpenAI: boolean;
 }
 
+/**
+ * The four billing buckets a request can land in, derived from the
+ * `anthropic-ratelimit-unified-representative-claim` response header.
+ *
+ * - `subscription`         — request billed against the user's 5h subscription window (Max/Pro)
+ * - `subscription_fallback` — server-side fallback subscription bucket (rare, still covered)
+ * - `extra_usage`          — overage / pay-as-you-go, paid on top of subscription
+ * - `api`                  — pure API key billing, no subscription involved
+ * - `unknown`              — header absent or unparseable (non-200 responses, stream aborts)
+ *
+ * Exposed in `/analytics` summaries and in verbose per-request logs so
+ * users can see at a glance which bucket their traffic is actually hitting.
+ * See #34 for background.
+ */
+export type BillingBucket =
+  | 'subscription'
+  | 'subscription_fallback'
+  | 'extra_usage'
+  | 'api'
+  | 'unknown';
+
+/**
+ * Map the raw `representative-claim` header value to a human-friendly
+ * billing bucket. Pure function; no state; safe to call from any context.
+ */
+export function billingBucketFromClaim(claim: string | null | undefined): BillingBucket {
+  switch (claim) {
+    case 'five_hour':
+      return 'subscription';
+    case 'five_hour_fallback':
+      return 'subscription_fallback';
+    case 'overage':
+      return 'extra_usage';
+    case 'api':
+      return 'api';
+    default:
+      return 'unknown';
+  }
+}
+
 // Anthropic pricing (per 1M tokens, USD). Not authoritative — used for
 // rough burn-rate display in the /analytics summary.
 const PRICING: Record<string, { input: number; output: number; cacheRead: number; cacheCreate: number }> = {
@@ -106,12 +146,20 @@ export class Analytics {
     };
   }
 
-  private computeStats(records: RequestRecord[]) {
+  private computeStats(records: RequestRecord[]): WindowStats {
     if (records.length === 0) {
       return {
         totalInputTokens: 0, totalOutputTokens: 0, totalThinkingTokens: 0,
         estimatedCost: 0, avgLatencyMs: 0, errorRate: 0,
-        claimBreakdown: {} as Record<string, number>,
+        claimBreakdown: {},
+        billingBucketBreakdown: {
+          subscription: 0,
+          subscription_fallback: 0,
+          extra_usage: 0,
+          api: 0,
+          unknown: 0,
+        },
+        subscriptionPercent: 0,
       };
     }
 
@@ -123,9 +171,23 @@ export class Analytics {
     const errors = records.filter(r => r.status >= 400).length;
 
     const claims: Record<string, number> = {};
+    const buckets: Record<BillingBucket, number> = {
+      subscription: 0,
+      subscription_fallback: 0,
+      extra_usage: 0,
+      api: 0,
+      unknown: 0,
+    };
     for (const r of records) {
       claims[r.claim] = (claims[r.claim] ?? 0) + 1;
+      buckets[billingBucketFromClaim(r.claim)]++;
     }
+
+    const subscriptionHits = buckets.subscription + buckets.subscription_fallback;
+    const billedRequests = records.length - buckets.unknown;
+    const subscriptionPct = billedRequests > 0
+      ? Math.round((subscriptionHits / billedRequests) * 10000) / 100
+      : 0;
 
     return {
       totalInputTokens: totalInput,
@@ -135,6 +197,8 @@ export class Analytics {
       avgLatencyMs: Math.round(avgLatency),
       errorRate: Math.round((errors / records.length) * 10000) / 10000,
       claimBreakdown: claims,
+      billingBucketBreakdown: buckets,
+      subscriptionPercent: subscriptionPct,
     };
   }
 
@@ -278,27 +342,31 @@ interface PerModelStat {
   estimatedCost: number;
 }
 
+interface WindowStats {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalThinkingTokens: number;
+  estimatedCost: number;
+  avgLatencyMs: number;
+  errorRate: number;
+  claimBreakdown: Record<string, number>;
+  /** Count of requests in each derived billing bucket. See #34. */
+  billingBucketBreakdown: Record<BillingBucket, number>;
+  /**
+   * Percentage of *classified* requests (non-unknown) that hit a
+   * subscription bucket. The headline number for "is dario routing me
+   * through my subscription?" — should be 100% for a clean setup. See #34.
+   */
+  subscriptionPercent: number;
+}
+
 export interface AnalyticsSummary {
-  window: {
+  window: WindowStats & {
     minutes: number;
     requests: number;
-    totalInputTokens: number;
-    totalOutputTokens: number;
-    totalThinkingTokens: number;
-    estimatedCost: number;
-    avgLatencyMs: number;
-    errorRate: number;
-    claimBreakdown: Record<string, number>;
   };
-  allTime: {
+  allTime: WindowStats & {
     requests: number;
-    totalInputTokens: number;
-    totalOutputTokens: number;
-    totalThinkingTokens: number;
-    estimatedCost: number;
-    avgLatencyMs: number;
-    errorRate: number;
-    claimBreakdown: Record<string, number>;
   };
   perAccount: Record<string, PerAccountStat>;
   perModel: Record<string, PerModelStat>;
