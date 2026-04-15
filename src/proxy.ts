@@ -1244,6 +1244,14 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     process.exit(1);
   });
 
+  // Kick off a live fingerprint refresh in the background. Re-captures the
+  // user's own CC binary request shape and updates ~/.dario/cc-template.live.json
+  // for the next startup. No-op if CC isn't installed or the cache is fresh.
+  // Never blocks proxy startup; never throws.
+  void import('./live-fingerprint.js').then(({ refreshLiveFingerprintAsync }) =>
+    refreshLiveFingerprintAsync({ silent: false }).catch(() => { /* noop */ }),
+  );
+
   server.listen(port, host, () => {
     const modeLine = passthrough
       ? 'Mode: passthrough (OAuth swap only, no injection)'

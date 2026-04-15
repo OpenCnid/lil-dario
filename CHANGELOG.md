@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.11.0] - 2026-04-15
+
+### Added — Live fingerprint extraction
+
+- **`src/live-fingerprint.ts`** — new module. At dario proxy startup, spawns the user's own `claude` binary against a loopback MITM endpoint, captures its outbound `/v1/messages` request, and extracts the live agent identity, system prompt, tool definitions, and CC version from the captured body. Writes the result to `~/.dario/cc-template.live.json` with a 24h TTL. Template replay reads the live cache at module init, falling back to the bundled `cc-template-data.json` snapshot only when the live cache is absent.
+
+  This eliminates the "Anthropic ships a new CC, dario is stale for 48 hours" window. Every dario install with CC available self-heals to the current CC fingerprint on next startup. No user action, no flag, no opt-in — it runs in the background on every `dario proxy` launch and never blocks startup. Users without CC installed see the exact same behavior as before.
+
+  The capture uses a single loopback HTTP server on a random high port, returns a minimal-valid SSE stream so CC completes cleanly, kills the child on capture, and writes the result atomically. Hard-timeout is 10 seconds; failures log a one-line warning and fall through to the bundled snapshot. Security boundary: the MITM only accepts 127.0.0.1, only lives for one request, and the child is killed immediately after the body is read. CC's OAuth token never leaves the machine — we hand CC a URL it already trusts because we set `ANTHROPIC_BASE_URL` in its environment.
+
+- **`test/live-fingerprint.mjs`** — 20 assertions covering: happy-path extraction from a synthetic CC-shaped request, version parsing from `x-anthropic-billing-header`, user-agent fallback when the billing header is absent, null-return on malformed bodies (missing system, short system, empty tools), live cache preference over bundled, and bundled fallback when no cache exists.
+
+### Changed
+
+- **`src/cc-template.ts`** — template loading delegates to `loadTemplate()` from `live-fingerprint.ts` instead of reading `cc-template-data.json` directly. The bundled snapshot is still shipped and still loaded when no live cache exists — behavior is a strict superset of pre-v3.11.
+- **`src/proxy.ts`** — on `startProxy()`, kicks off `refreshLiveFingerprintAsync()` in the background right before `server.listen()`. Fire-and-forget; errors are swallowed. The refresh result is written to cache for the **next** dario startup, so the first run after this upgrade still uses the bundled snapshot and every subsequent run uses live data.
+
+### Why this release
+
+Fingerprint maintenance has been a manual treadmill: every CC release could in principle shift the agent identity, tool schemas, or the system prompt, and until we updated `cc-template-data.json` any new user would be running a stale template. Live capture makes the treadmill self-service — each user's dario pulls the fingerprint from their own CC install at startup, so template replay is always in sync with whatever CC version is actually installed locally, without any dependency on us shipping updates.
+
+This is part 1 of a two-part "get ahead of Anthropic" plan. Part 2 (shim-mode, NODE_OPTIONS injection into a live CC process, discussed in the architecture notes) is not in this release — it's a larger change and will land as v3.12 opt-in.
+
+---
+
 ## [3.10.3] - 2026-04-15
 
 ### Fixed

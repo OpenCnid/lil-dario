@@ -2,28 +2,16 @@
  * Claude Code request template.
  *
  * Tool definitions, system prompt, and request structure are loaded from
- * cc-template-data.json and sent verbatim — this gives byte-level fidelity
- * with the shape of a real Claude Code request.
+ * the live fingerprint cache (captured from the user's own CC install at
+ * dario startup) or from the bundled cc-template-data.json snapshot. The
+ * live cache self-heals when Anthropic ships a new CC version — no user
+ * action required. See src/live-fingerprint.ts for the capture pipeline.
  */
 
-import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { loadTemplate, TemplateData } from './live-fingerprint.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-interface TemplateData {
-  _version: string;
-  agent_identity: string;
-  system_prompt: string;
-  tools: Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
-  tool_names: string[];
-}
-
-// Load template data at module init — fail fast if missing
-const TEMPLATE: TemplateData = JSON.parse(
-  readFileSync(join(__dirname, 'cc-template-data.json'), 'utf-8'),
-);
+// Load template at module init — prefer live cache, fall back to bundled.
+const TEMPLATE: TemplateData = loadTemplate({ silent: true });
 
 /** CC's exact tool definitions — loaded from the template JSON. */
 export const CC_TOOL_DEFINITIONS = TEMPLATE.tools;
