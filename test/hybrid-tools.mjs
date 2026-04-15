@@ -504,6 +504,95 @@ header('dario#37 (Glob) — unmapped `image` cannot steal Glob reverse slot');
 }
 
 // ======================================================================
+//  dario#37 (Glob half) — streaming reverse mapper also preserves Glob
+// ======================================================================
+//
+// Streaming is the production path for CC. buildReverseLookup is shared
+// between reverseMapResponse (non-streaming) and createStreamingReverseMapper
+// (SSE), so the reverseScore: 0 exclusion applies to both — but the
+// streaming path has its own content_block_start / delta / stop handling
+// that could in principle diverge. Cover it explicitly.
+header('dario#37 (Glob) — streaming: real Glob passes through unchanged');
+{
+  const body = {
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'list /tmp' }],
+    stream: true,
+    tools: [
+      { name: 'unmapped_a', description: 'x', input_schema: { type: 'object', properties: {} } },
+      { name: 'unmapped_b', description: 'x', input_schema: { type: 'object', properties: {} } },
+      { name: 'unmapped_c', description: 'x', input_schema: { type: 'object', properties: {} } },
+      { name: 'image', description: 'render an image', input_schema: { type: 'object', properties: { prompt: { type: 'string' } } } },
+    ],
+  };
+  const built = buildCCRequest(
+    JSON.parse(JSON.stringify(body)),
+    'billing',
+    { type: 'ephemeral', ttl: '1h' },
+    { deviceId: 'd', accountUuid: 'a', sessionId: 's' },
+    {},
+  );
+  // Test premise check — if round-robin ever changes this will fail loud.
+  check('stream premise: `image` is round-robin\'d onto Glob', built.toolMap.get('image')?.ccTool === 'Glob');
+
+  // Simulate a real upstream SSE stream carrying a Glob tool_use. If the
+  // streaming reverse mapper rewrote block.name to `image`, OpenClaw would
+  // see an `image` tool call in its SSE stream with a `{pattern: ...}` body
+  // and hit the "image required" validation error on the wire.
+  const sseChunks = [
+    `event: message_start\ndata: {"type":"message_start","message":{"id":"msg_g","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}\n\n`,
+    `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_g","name":"Glob","input":{}}}\n\n`,
+    `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"patt"}}\n\n`,
+    `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"ern\\":\\"/tmp/*\\"}"}}\n\n`,
+    `event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n`,
+    `event: message_stop\ndata: {"type":"message_stop"}\n\n`,
+  ];
+  const mapper = createStreamingReverseMapper(built.toolMap);
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  const out = [];
+  for (const chunk of sseChunks) {
+    const bytes = mapper.feed(enc.encode(chunk));
+    if (bytes.length > 0) out.push(dec.decode(bytes));
+  }
+  const tail = mapper.end();
+  if (tail.length > 0) out.push(dec.decode(tail));
+  const wire = out.join('');
+
+  // Parse the emitted SSE using the same lightweight parser pattern as
+  // issue-29 — look for content_block_start events and verify the tool
+  // name is "Glob", not "image", and the partial_json input carries
+  // `pattern`.
+  const events = [];
+  for (const group of wire.split('\n\n')) {
+    if (!group.trim()) continue;
+    let eventType = null, dataText = '';
+    for (const line of group.split('\n')) {
+      if (line.startsWith('event: ')) eventType = line.slice(7);
+      else if (line.startsWith('data: ')) dataText += (dataText ? '\n' : '') + line.slice(6);
+    }
+    if (!dataText) continue;
+    try { events.push({ eventType, data: JSON.parse(dataText) }); } catch { /* skip */ }
+  }
+  const starts = events.filter(e => e.data?.type === 'content_block_start');
+  const deltas = events.filter(e => e.data?.type === 'content_block_delta');
+  check('exactly 1 content_block_start emitted', starts.length === 1);
+  check('streaming start event: tool name is `Glob`, NOT `image`', starts[0]?.data?.content_block?.name === 'Glob');
+  check('streaming start event: block type is tool_use', starts[0]?.data?.content_block?.type === 'tool_use');
+  // Deltas: Glob has no legitimate mapping here, so the mapper should
+  // pass the original deltas through unchanged (not collapse them into
+  // a synthetic single delta the way it does for translated blocks).
+  check('streaming deltas pass through (≥1 emitted)', deltas.length >= 1);
+  // Concatenate all partial_json fragments and parse — should yield the
+  // original input shape.
+  const fullInput = deltas.map(d => d.data?.delta?.partial_json || '').join('');
+  let parsed = null;
+  try { parsed = JSON.parse(fullInput); } catch { /* leave null */ }
+  check('streaming input parses as JSON', parsed !== null);
+  check('streaming input.pattern === "/tmp/*"', parsed?.pattern === '/tmp/*');
+}
+
+// ======================================================================
 //
 // ======================================================================
 header('dario#36 — drop trailing assistant/empty turns (prefill rejection)');
