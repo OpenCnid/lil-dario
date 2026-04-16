@@ -251,13 +251,13 @@ const TOOL_MAP: Record<string, ToolMapping> = {
   grep: { ccTool: 'Grep' },
   search: {
     ccTool: 'Grep',
-    translateArgs: (a) => ({ pattern: a.query || a.pattern || '' }),
-    translateBack: (a) => ({ query: a.pattern ?? '' }),
+    translateArgs: (a) => ({ pattern: a.query || a.pattern || '', ...(a.path ? { path: a.path } : {}) }),
+    translateBack: (a) => ({ query: a.pattern ?? '', pattern: a.pattern ?? '', path: a.path ?? '.' }),
   },
   search_files: {
     ccTool: 'Grep',
-    translateArgs: (a) => ({ pattern: a.query || a.pattern || '' }),
-    translateBack: (a) => ({ query: a.pattern ?? '' }),
+    translateArgs: (a) => ({ pattern: a.query || a.pattern || a.regex || '', ...(a.path ? { path: a.path } : {}), ...(a.filePattern ? { glob: a.filePattern } : {}) }),
+    translateBack: (a) => ({ query: a.pattern ?? '', pattern: a.pattern ?? '', regex: a.pattern ?? '', path: a.path ?? '.', filePattern: a.glob ?? '' }),
   },
   web_search: {
     ccTool: 'WebSearch',
