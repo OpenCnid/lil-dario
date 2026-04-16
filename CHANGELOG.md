@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.16.0] - 2026-04-16
+
+### Added — Proxy-mode header_order replay (closes v3.13.0 deferred item)
+
+v3.13.0 captured CC's exact outbound header sequence in `template.header_order` and wired it into the shim's `rewriteHeaders`, but left the proxy emitting headers in the insertion-order Node's fetch happens to serialize. That was the explicit deferred item: *"Proxy-mode replay of header_order is deferred to v3.13.x — the same `template.header_order` field is already loaded into the proxy's template replay path and will pick up automatically when the proxy's outbound header builder is extended."* v3.16.0 extends it. Every outbound `/v1/messages` request from the proxy now serializes headers in the exact sequence CC emits on the wire, matching the shim — so header sequence is no longer a signal that distinguishes proxy traffic from shim traffic from real CC.
+
+- **`src/cc-template.ts`** — new `orderHeadersForOutbound(headers, overrideHeaderOrder?)` helper. When the live template has no `header_order` (bundled-only installs, or a capture that didn't record `rawHeaders`) it returns the input record unchanged — strict no-op, no behavior change for users who haven't run a live fingerprint capture yet. When `header_order` is present it returns an `Array<[string, string]>` of pairs in captured order. The array form is used because it's the one `HeadersInit` variant that preserves wire order under the fetch spec — a plain object gets iterated case-insensitively by the underlying HTTP library, and a `Headers` instance iterates alphabetically. Caller-supplied headers absent from the captured order (content-type, content-length, client betas that weren't in CC's capture) are appended at the tail in caller insertion order so nothing is silently dropped. Name matching is case-insensitive so the helper works equally on the proxy's mixed-case record and the shim's lowercased Map. Logic mirrors `rewriteHeaders` in `src/shim/runtime.cjs` — two transports, one wire shape.
+- **`src/proxy.ts`** — both outbound fetch call sites (main dispatch at `/v1/messages`, and the context-1m retry) now pass `orderHeadersForOutbound(headers)` to `fetch` instead of the raw record. Pool-failover paths mutate the same `headers` record in place and re-enter the main dispatch loop, so they pick up the new ordering through the main site. Passthrough mode (`--passthrough` / `--thin`) is explicitly bypassed — passthrough means "don't shape this request to look like CC," and reordering is a form of shaping; preserving that split keeps passthrough's intent intact.
+- **`test/proxy-header-order.mjs`** — 20 assertions on the pure helper. Covers: undefined/empty `header_order` returns the input record reference-unchanged (no-op), captured five-header order is preserved exactly, case-insensitive matching with case-preserving emission from the captured order, extras tail-append in caller insertion order, absent-from-caller names skipped rather than emitted as `undefined`, duplicate names in captured order deduped (first-occurrence wins), empty caller record with non-empty captured order produces an empty array. Registered in `npm test`.
+
+Total test footprint: **~396 assertions across 13 files** (was ~376 across 12). Full `npm test` green.
+
+### Why this release
+
+Closes the last of the v3.13.0 "hide in the population" deferred work. With shim mode and proxy mode now emitting identical header sequences, the remaining fingerprint vectors (TLS JA3/JA4, HTTP/2 SETTINGS, request timing, sessionId rotation cadence, body field ordering — see `src/live-fingerprint.ts` design comment) are transport-layer concerns that don't live at the outbound-header boundary. This is the cheapest lever-pull per line of code on that roadmap, and it's the one that was already designed in v3.13.0 and just needed shipping.
+
+---
+
+## [3.15.0] - 2026-04-16
+
+### Added — OpenClaw + Hermes coverage on TOOL_MAP
+
+Three new entries close out tool-name coverage for the Hermes agent framework on top of the universal `TOOL_MAP` introduced in v3.14. OpenClaw's `exec` / `process` / `web_search` / `web_fetch` / `browser` / `message` were already covered from prior releases, and Hermes's `terminal` shares the `{command}` shape of the existing `terminal` entry — so neither needed new entries, only a confirmation pass and a code comment recording the overlap. Total `TOOL_MAP` entry count: **71**.
+
+- **`src/cc-template.ts`** — three new entries. `patch` (Hermes → `Edit`, translateBack rebuilds the `{mode: "replace", replace_all: false}` envelope Hermes's validator expects). `web_extract` (Hermes → `WebFetch`, handles the `{urls: [...]}` input shape by forwarding the first URL and rebuilds the array on the return path). `clarify` (Hermes → `AskUserQuestion`). A short comment near the `execute_bash` / `terminal` region documents that Hermes's `terminal` tool routes through the existing entry unchanged, so future readers don't assume it's missing.
+
+### Why this release
+
+Pure compatibility expansion on top of v3.14. Users on Hermes (or any future framework whose `patch` / `web_extract` / `clarify` names collide with these) now route through the Claude backend without `--preserve-tools`, keeping the CC fingerprint intact. No crypto, no fingerprint, no new surface area — the point is that dario stops being the source of tool-validation failures for one more agent family.
+
+---
+
+## [3.14.0] - 2026-04-16
+
+### Added — Universal TOOL_MAP for every major coding agent (#40)
+
+Pre-mapped tool-name translations for **Cline, Roo Code, Cursor, Windsurf, Continue.dev, GitHub Copilot, and OpenHands**. Each ships its own tool schema — seven different ways to say "run a command" (`execute_command`, `run_terminal_cmd`, `run_command`, `builtin_run_terminal_command`, `run_in_terminal`, `execute_bash`), and equivalent divergence on edit / read / write / search / glob. Before v3.14 most of these needed `--preserve-tools` to route through the Claude backend without the model's outputs coming back stripped of required fields, which meant trading away the CC subscription fingerprint to make the agent work. The universal `TOOL_MAP` lifts that trade: whichever agent you're running, its tool calls translate to CC's `Bash/Read/Write/Edit/Grep/Glob/WebSearch/WebFetch` on the outbound path and rebuild to the agent's exact expected shape — including agent-specific fields CC's schema never carried — on the inbound path. Subscription fingerprint stays intact. Validator is happy.
+
+- **`src/cc-template.ts`** — 28 new `TOOL_MAP` entries plus broadened `translateArgs` alias-accept on several existing ones.
+
+  - **Bash family.** `execute_command` (Cline / Roo), `run_terminal_cmd` (Cursor, preserves `explanation` ↔ `description`), `run_command` (Windsurf, rebuilds `CommandLine` + `Blocking: true`), `builtin_run_terminal_command` (Continue.dev), `run_in_terminal` (Copilot), `execute_bash` (OpenHands, rebuilds `is_input: "false"` + `security_risk: "LOW"`).
+  - **Read family.** `view_file` (Windsurf, with `StartLine`/`EndLine` ↔ `offset`/`limit` arithmetic so line ranges round-trip), `builtin_read_file` (Continue.dev), plus `target_file` (Cursor) now accepted as an alias on the existing `read_file` mapping.
+  - **Write family.** `write_to_file` (Cline / Roo / Windsurf, with `TargetFile` + `CodeContent` aliases), `builtin_create_new_file` (Continue.dev). The existing `edit_file` was fleshed out from a bare `{ccTool: 'Edit'}` to a full args/translateBack pair that accepts Cursor's `target_file` and OpenHands's `old_str`/`new_str` aliases.
+  - **Edit family.** `replace_in_file` (Cline / Roo), `apply_diff` (Roo, `reverseScore: 1` because the true inbound shape carries a `diff` string dario can't reconstruct from `{old_string, new_string}` alone — legitimate Edit mappings win the reverse-path tie), `search_replace` (Roo / Cursor), `builtin_edit_existing_file` (Continue.dev, with `replacement` ↔ `new_string`), `insert_edit_into_file` (Copilot, with `code` ↔ `new_string`), `str_replace_editor` (OpenHands, rebuilds `command: "str_replace"` + `security_risk: "LOW"`).
+  - **Glob family.** `file_search` (Cursor, accepts `glob_pattern` / `query`), `list_dir` (Cursor / Windsurf / Copilot, `reverseScore: 3` — it's a common collision target), `find_by_name` (Windsurf, `reverseScore: 5` — highest in the Glob slot because the `{Pattern, SearchDirectory}` shape is most specific), `builtin_file_glob_search` + `builtin_ls` (Continue.dev, `builtin_ls` carries `reverseScore: 1` to yield to any real glob).
+  - **Grep family.** `grep_search` (Cursor / Windsurf, handles `Includes[]` → `glob` on the outbound path), `codebase_search` (Cursor / Windsurf / Roo / Copilot, `reverseScore: 3`), `builtin_grep_search` (Continue.dev), `semantic_search` (Copilot, `reverseScore: 2`).
+  - **Web family.** `read_url_content` (Windsurf), `fetch_webpage` (Copilot), `search_web` (Windsurf → `WebSearch`).
+
+  Tool-schema-unique fields that CC's schema doesn't carry (`is_background`, `Blocking`, `recursive`, `security_risk`, `explanation`, `CommandLine`, `AbsolutePath`, `TargetFile`, `CodeContent`, `SearchDirectory`, `Includes`, etc.) are reconstructed on `translateBack` with the agent's expected defaults so the inbound validator is satisfied. Reverse-score values on colliding entries keep the v3.9.6 / v3.12.1 disambiguation machinery working correctly when more than one agent's tools map onto the same CC slot.
+
+### Why this release
+
+The `--preserve-tools` discoverability issue surfaced in v3.8.1 and the hybrid-tools workaround from v3.9.0 both existed because dario's translator knew about Claude Code's own tools and not much else. Every agent with its own tool names was a silent failure case unless the user knew to flip `--preserve-tools` (and lose the fingerprint) or `--hybrid-tools` (and paper over the gap with request context). v3.14 makes the default mode work for the agents people actually run — no flag, no fingerprint loss, no validator errors, no issue thread. It's the biggest single audience-expansion release dario has shipped.
+
+---
+
 ## [3.13.0] - 2026-04-15
 
 ### Added — Session stickiness for AccountPool

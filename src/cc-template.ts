@@ -22,6 +22,68 @@ export const CC_SYSTEM_PROMPT = TEMPLATE.system_prompt;
 /** CC's agent identity string. */
 export const CC_AGENT_IDENTITY = TEMPLATE.agent_identity;
 
+/**
+ * Apply the live template's captured header_order to an outbound header
+ * record. Returns a HeadersInit in one of two forms:
+ *
+ * - If the template has no header_order (bundled-only install, or capture
+ *   didn't record rawHeaders), returns the input record unchanged.
+ * - If header_order is present, returns an array of [name, value] pairs
+ *   in the captured order. `fetch()` serializes pairs to the wire in
+ *   array order; a plain Record or Headers instance doesn't preserve
+ *   order in the same way (Headers iteration is spec-sorted alphabetically,
+ *   and while modern V8 iterates own-property keys in insertion order,
+ *   nothing in the fetch contract guarantees that order reaches the HTTP
+ *   layer untouched — the array form is the one variant where wire order
+ *   is part of the spec).
+ *
+ * Caller-supplied headers that don't appear in the captured order are
+ * appended at the tail in their original insertion order so host-set
+ * headers (content-type, content-length) aren't silently dropped. Names
+ * in the captured order are emitted in the template's exact case; names
+ * only in the caller's map keep the caller's case.
+ *
+ * Matches `rewriteHeaders` in `src/shim/runtime.cjs` — the shim and the
+ * proxy are two transports that need to produce the same wire shape.
+ *
+ * @param headers outbound headers the proxy built
+ * @param overrideHeaderOrder test-only override; production callers pass nothing
+ */
+export function orderHeadersForOutbound(
+  headers: Record<string, string>,
+  overrideHeaderOrder?: string[] | undefined,
+): Record<string, string> | Array<[string, string]> {
+  const order = overrideHeaderOrder !== undefined ? overrideHeaderOrder : TEMPLATE.header_order;
+  if (!Array.isArray(order) || order.length === 0) {
+    return headers;
+  }
+  const lowerToValue = new Map<string, string>();
+  const lowerToOriginalKey = new Map<string, string>();
+  for (const [k, v] of Object.entries(headers)) {
+    const lk = k.toLowerCase();
+    lowerToValue.set(lk, v);
+    lowerToOriginalKey.set(lk, k);
+  }
+  const ordered: Array<[string, string]> = [];
+  const seen = new Set<string>();
+  for (const name of order) {
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    const value = lowerToValue.get(key);
+    if (value !== undefined) {
+      ordered.push([name, value]);
+      seen.add(key);
+    }
+  }
+  for (const [k, v] of Object.entries(headers)) {
+    const lk = k.toLowerCase();
+    if (!seen.has(lk)) {
+      ordered.push([k, v]);
+    }
+  }
+  return ordered;
+}
+
 // Framework identifiers that would flag non-CC usage. Stripped from the system
 // prompt and from message content text blocks before the request goes upstream.
 const FRAMEWORK_PATTERNS: RegExp[] = [

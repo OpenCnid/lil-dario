@@ -410,11 +410,29 @@ Recognized prefixes:
 
 The prefix gets stripped before the request goes upstream — the backend only sees the bare model name. Unrecognized prefixes are ignored, so ollama-style `llama3:8b` passes through untouched. `dario proxy --model=openai:gpt-4o` applies the prefix to every request server-wide.
 
+### Agent compatibility
+
+As of **v3.15.0**, dario's built-in `TOOL_MAP` has **71 entries** covering the tool schemas of every major coding agent. If you're running one of these, no flag is required on the Claude backend — tool calls translate to CC's native `Bash/Read/Write/Edit/Glob/Grep/WebSearch/WebFetch` on the outbound path (so the subscription fingerprint stays intact) and rebuild to your agent's exact expected shape on the inbound path (so your validator is happy).
+
+| Agent | Covered tool names (subset) |
+|---|---|
+| Claude Code | default — CC's own tools |
+| Cline / Roo Code | `execute_command`, `write_to_file`, `replace_in_file`, `apply_diff`, `list_files`, `search_files`, `read_file` |
+| Cursor | `run_terminal_cmd`, `edit_file`, `search_replace`, `codebase_search`, `grep_search`, `file_search`, `list_dir`, `read_file` (`target_file`) |
+| Windsurf | `run_command`, `view_file`, `write_to_file`, `replace_file_content`, `find_by_name`, `grep_search`, `list_dir`, `search_web`, `read_url_content` |
+| Continue.dev | `builtin_run_terminal_command`, `builtin_read_file`, `builtin_create_new_file`, `builtin_edit_existing_file`, `builtin_file_glob_search`, `builtin_grep_search`, `builtin_ls` |
+| GitHub Copilot | `run_in_terminal`, `insert_edit_into_file`, `semantic_search`, `codebase_search`, `list_dir`, `fetch_webpage` |
+| OpenHands | `execute_bash`, `str_replace_editor` |
+| OpenClaw | `exec`, `process`, `web_search`, `web_fetch`, `browser`, `message` |
+| Hermes | `terminal`, `patch`, `web_extract`, `clarify` |
+
+If your agent's tool names aren't in this list, you've got two escape hatches below: **`--preserve-tools`** (forward your schema verbatim, lose the CC fingerprint) or **`--hybrid-tools`** (keep the fingerprint, fill request-context fields from headers). Open an issue with your agent's tool schema and we'll add a pre-mapping entry.
+
 ### Custom tool schemas
 
-By default, on the Claude backend, dario replaces your client's tool definitions with the real Claude Code tools (`Bash`, `Read`, `Grep`, `Glob`, `WebSearch`, `WebFetch`) and translates parameters back and forth. That's how dario looks like CC on the wire, which is what lets your request bill against your Claude subscription instead of API pricing.
+By default, on the Claude backend, dario replaces your client's tool definitions with the real Claude Code tools (`Bash`, `Read`, `Write`, `Edit`, `Grep`, `Glob`, `WebSearch`, `WebFetch`) and translates parameters back and forth. That's how dario looks like CC on the wire, which is what lets your request bill against your Claude subscription instead of API pricing. For the agents listed in [Agent compatibility](#agent-compatibility) above, the translation is pre-mapped and runs automatically — nothing to configure.
 
-The trade-off: if your client's tools carry fields CC's schema doesn't have — a `sessionId`, a custom request id, a channel-bound context token — those fields don't survive the round trip. The model only ever sees `Bash({command})`, responds with `Bash({command})`, and dario's reverse map rebuilds your tool call without the fields the model never saw. Your validator then rejects the call for a missing required field.
+The trade-off shows up when you're running something that *isn't* in the pre-mapped list and whose tools carry fields CC's schema doesn't have — a `sessionId`, a custom request id, a channel-bound context token, a `confidence` score the model is supposed to emit. Those fields don't survive the round trip. The model only ever sees `Bash({command})`, responds with `Bash({command})`, and dario's reverse map rebuilds your tool call without the fields the model never saw. Your validator then rejects the call for a missing required field.
 
 Symptom: your tool calls come back looking stripped-down, or your runtime complains about a required field being absent *only when routed through dario's Claude backend*, while the same tools work fine against a direct API key or the OpenAI-compat backend.
 
@@ -442,9 +460,10 @@ dario proxy --hybrid-tools
 
 | Your situation | Flag | Why |
 |---|---|---|
+| Your agent is listed in [Agent compatibility](#agent-compatibility) | *(neither)* | Pre-mapped in `TOOL_MAP`; the default path already handles it. |
 | Your custom fields are request context (session/request/channel/user ids, timestamps) | `--hybrid-tools` | Keeps the CC fingerprint *and* your validator is satisfied. |
 | Your custom fields need the model's reasoning (e.g. `confidence`, `reasoning_trace`, `tool_selection_rationale`) | `--preserve-tools` | The model has to see the real schema to populate these. Accept the fingerprint loss. |
-| Your client's tools are already a subset of CC's `Bash/Read/Grep/Glob/WebSearch/WebFetch` | *(neither)* | Default mode works as-is. |
+| Your client's tools are already a subset of CC's `Bash/Read/Write/Edit/Grep/Glob/WebSearch/WebFetch` | *(neither)* | Default mode works as-is. |
 
 Hybrid mode was built to resolve [#29](https://github.com/askalf/dario/issues/29) cleanly for OpenClaw-style agents whose `process` tool declares `sessionId`, after the full provider-comparison diagnostic from [@boeingchoco](https://github.com/boeingchoco) made clear that the problem wasn't fixable in the translation layer alone.
 

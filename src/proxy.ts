@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { arch, platform } from 'node:process';
 import { getAccessToken, getStatus } from './oauth.js';
-import { buildCCRequest, reverseMapResponse, createStreamingReverseMapper, type ToolMapping, type RequestContext } from './cc-template.js';
+import { buildCCRequest, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, type ToolMapping, type RequestContext } from './cc-template.js';
 import { AccountPool, computeStickyKey, parseRateLimits, type PoolAccount } from './pool.js';
 import { Analytics, billingBucketFromClaim } from './analytics.js';
 import { loadAllAccounts, loadAccount, refreshAccountToken } from './accounts.js';
@@ -1030,9 +1030,14 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // the next-best account before surfacing the error to the client.
       // Bounded to pool.size iterations; breaks immediately on any non-429.
       dispatchLoop: while (true) {
+        // Reorder outbound headers to match CC's captured header sequence
+        // when the live template recorded one. No-op on bundled-only installs.
+        // Skipped in passthrough mode — passthrough means "don't shape the
+        // request to look like CC," and reordering is a form of shaping.
+        const outboundHeaders = passthrough ? headers : orderHeadersForOutbound(headers);
         upstream = await fetch(targetBase, {
           method: req.method ?? 'POST',
-          headers,
+          headers: outboundHeaders,
           body: finalBody ? new Uint8Array(finalBody) : undefined,
           signal: upstreamAbort.signal,
         });
@@ -1073,7 +1078,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           const retryHeaders = { ...headers, 'anthropic-beta': reducedBeta };
           const retry = await fetch(targetBase, {
             method: req.method ?? 'POST',
-            headers: retryHeaders,
+            headers: passthrough ? retryHeaders : orderHeadersForOutbound(retryHeaders),
             body: finalBody ? new Uint8Array(finalBody) : undefined,
             signal: upstreamAbort.signal,
           });
