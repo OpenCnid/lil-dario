@@ -100,7 +100,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * wrong behavior if loaded verbatim. Mismatched caches are rejected at
  * load time so the fallback + next background refresh write a fresh one.
  */
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export interface TemplateData {
   _version: string;
@@ -119,6 +119,23 @@ export interface TemplateData {
    * header ordering instead of Node's alphabetical default.
    */
   header_order?: string[];
+  /**
+   * The `anthropic-beta` flag set CC sent on the captured request, verbatim.
+   * Schema v2 (v3.19). Previously the proxy path hardcoded this — bumping
+   * CC's beta list required a dario release. Now the shim and proxy both
+   * replay whatever the live capture recorded. Falls back to
+   * `'claude-code-20250219'` when undefined (bundled snapshots, older caches).
+   */
+  anthropic_beta?: string;
+  /**
+   * Selected static headers CC sent on the captured request. Scoped to
+   * fingerprint-relevant keys — values that CC sets identically on every
+   * request and that don't change per session (user-agent, anthropic-version,
+   * x-app, x-stainless-*). Excludes auth (authorization), body-framing
+   * (content-type, content-length, host), and session-scoped identifiers
+   * (x-claude-code-session-id, x-client-request-id). Schema v2.
+   */
+  header_values?: Record<string, string>;
 }
 
 const LIVE_CACHE = join(homedir(), '.dario', 'cc-template.live.json');
@@ -419,6 +436,15 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
         return;
       }
 
+      // Node 20+ won't spawn `.cmd`/`.bat` without `shell: true` (CVE-2024-27980).
+      // `useShell` triggers cmd.exe on Windows — reject overrides that carry
+      // shell metacharacters before the spawn, same guard as probeInstalledCCVersion.
+      const useShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(claudeBin);
+      if (useShell && /[&|><^"'%\r\n`$;(){}[\]]/.test(claudeBin)) {
+        settle(null);
+        return;
+      }
+
       try {
         child = spawn(claudeBin, ['--print', '-p', 'hi'], {
           env: {
@@ -430,6 +456,7 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
           },
           stdio: ['ignore', 'ignore', 'ignore'],
           windowsHide: true,
+          shell: useShell,
         });
         child.on('error', () => settle(null));
         child.on('exit', () => {
@@ -524,6 +551,8 @@ export function extractTemplate(captured: CapturedRequest): TemplateData | null 
 
   const version = extractCCVersion(captured.headers) ?? 'unknown';
   const headerOrder = extractHeaderOrder(captured.rawHeaders);
+  const anthropicBeta = captured.headers['anthropic-beta'];
+  const headerValues = extractStaticHeaderValues(captured.headers);
 
   return {
     _version: version,
@@ -535,7 +564,41 @@ export function extractTemplate(captured: CapturedRequest): TemplateData | null 
     tools,
     tool_names: tools.map((t) => t.name),
     header_order: headerOrder,
+    anthropic_beta: typeof anthropicBeta === 'string' ? anthropicBeta : undefined,
+    header_values: Object.keys(headerValues).length > 0 ? headerValues : undefined,
   };
+}
+
+/**
+ * Pick header values from the captured request that CC would set identically
+ * on every outbound call. The replayer overlays these on top of whatever the
+ * caller supplied, so anything session-scoped, auth-bearing, or computed by
+ * the HTTP stack itself must be excluded.
+ */
+const STATIC_HEADER_EXCLUDE = new Set<string>([
+  // Auth — never replay across identities
+  'authorization',
+  // Body-framing — computed per request
+  'content-type', 'content-length', 'transfer-encoding',
+  // Host / connection — managed by the HTTP stack
+  'host', 'connection', 'keep-alive', 'accept-encoding',
+  // Session / request identifiers — rotate per call
+  'x-claude-code-session-id', 'x-client-request-id', 'x-request-id',
+  // Beta flag is captured separately
+  'anthropic-beta',
+  // Billing tag — rebuilt per request from cc_version
+  'x-anthropic-billing-header',
+]);
+
+function extractStaticHeaderValues(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    const lk = k.toLowerCase();
+    if (STATIC_HEADER_EXCLUDE.has(lk)) continue;
+    if (typeof v !== 'string') continue;
+    out[lk] = v;
+  }
+  return out;
 }
 
 // ============================================================
@@ -568,11 +631,16 @@ function probeInstalledCCVersionUncached(): string | null {
     // Node 20+ refuses to spawn `.cmd`/`.bat` via execFile without
     // explicit `shell: true` (CVE-2024-27980 hardening). On Windows,
     // npm-installed CLIs commonly live behind a `.cmd` shim — detect
-    // that and opt into the shell path. Input is bounded: the binary
-    // name comes from `findClaudeBinary`'s fixed allow-list and the
-    // only argument is the literal `--version`, so there's no
-    // injection surface.
+    // that and opt into the shell path.
+    //
+    // `bin` is normally from findClaudeBinary's fixed allow-list, but
+    // DARIO_CLAUDE_BIN lets users override it. If that override reaches
+    // the shell path, cmd.exe interprets its contents — so reject any
+    // override that carries shell metacharacters before we spawn.
     const useShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(bin);
+    if (useShell && /[&|><^"'%\r\n`$;(){}[\]]/.test(bin)) {
+      return null;
+    }
     const out = execFileSync(bin, ['--version'], {
       encoding: 'utf-8',
       timeout: 2_000,

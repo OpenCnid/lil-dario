@@ -387,6 +387,96 @@ header('readLiveCache — schema mismatch does NOT quarantine (expected version-
 process.stderr.write = originalStderrWrite;
 
 // ======================================================================
+//  Schema v2 (v3.19) — anthropic_beta + header_values captured from request
+// ======================================================================
+header('extractTemplate — anthropic_beta + header_values (schema v2)');
+{
+  const captured = {
+    method: 'POST',
+    path: '/v1/messages',
+    headers: {
+      'user-agent': 'claude-cli/2.1.104 (external, cli)',
+      'x-anthropic-billing-header': 'cc_version=2.1.104; cch=abc',
+      'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07',
+      'anthropic-version': '2023-06-01',
+      'x-app': 'cli',
+      'x-stainless-arch': 'x64',
+      'x-stainless-lang': 'js',
+      'x-stainless-os': 'Linux',
+      'x-stainless-package-version': '0.81.0',
+      'x-stainless-retry-count': '0',
+      'x-stainless-runtime': 'node',
+      'x-stainless-runtime-version': 'v24.3.0',
+      'authorization': 'Bearer SECRET',
+      'content-type': 'application/json',
+      'content-length': '512',
+      'host': 'api.anthropic.com',
+      'x-claude-code-session-id': 'session-abc',
+      'x-client-request-id': 'rid-xyz',
+    },
+    rawHeaders: [
+      'host', 'api.anthropic.com',
+      'user-agent', 'claude-cli/2.1.104 (external, cli)',
+      'anthropic-version', '2023-06-01',
+      'anthropic-beta', 'claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07',
+    ],
+    body: {
+      system: [
+        { type: 'text', text: 'billing tag' },
+        { type: 'text', text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
+        { type: 'text', text: 'system prompt body with enough content to look real' },
+      ],
+      tools: [{ name: 'Bash', description: '', input_schema: {} }],
+    },
+  };
+  const t = _extractTemplateForTest(captured);
+  check('_schemaVersion === 2', t?._schemaVersion === 2);
+  check('anthropic_beta captured verbatim',
+    t?.anthropic_beta === 'claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07');
+  check('header_values is an object', typeof t?.header_values === 'object' && t?.header_values !== null);
+  check('header_values contains user-agent', t?.header_values?.['user-agent'] === 'claude-cli/2.1.104 (external, cli)');
+  check('header_values contains x-app', t?.header_values?.['x-app'] === 'cli');
+  check('header_values contains x-stainless-package-version',
+    t?.header_values?.['x-stainless-package-version'] === '0.81.0');
+  check('header_values excludes authorization', !('authorization' in (t?.header_values ?? {})));
+  check('header_values excludes content-type', !('content-type' in (t?.header_values ?? {})));
+  check('header_values excludes content-length', !('content-length' in (t?.header_values ?? {})));
+  check('header_values excludes host', !('host' in (t?.header_values ?? {})));
+  check('header_values excludes anthropic-beta (captured separately)',
+    !('anthropic-beta' in (t?.header_values ?? {})));
+  check('header_values excludes x-anthropic-billing-header (per-request)',
+    !('x-anthropic-billing-header' in (t?.header_values ?? {})));
+  check('header_values excludes x-claude-code-session-id',
+    !('x-claude-code-session-id' in (t?.header_values ?? {})));
+  check('header_values excludes x-client-request-id',
+    !('x-client-request-id' in (t?.header_values ?? {})));
+}
+
+header('extractTemplate — omits anthropic_beta + header_values when absent');
+{
+  // Captured request with no anthropic-beta header — field should be undefined,
+  // not an empty string. Header_values still fires for user-agent etc.
+  const captured = {
+    method: 'POST',
+    path: '/v1/messages',
+    headers: { 'user-agent': 'claude-cli/2.1.104' },
+    rawHeaders: [],
+    body: {
+      system: [
+        { type: 'text', text: 'tag' },
+        { type: 'text', text: 'agent' },
+        { type: 'text', text: 'prompt' },
+      ],
+      tools: [{ name: 'Bash', description: '', input_schema: {} }],
+    },
+  };
+  const t = _extractTemplateForTest(captured);
+  check('anthropic_beta undefined when header missing', t?.anthropic_beta === undefined);
+  check('header_values still captures user-agent',
+    t?.header_values?.['user-agent'] === 'claude-cli/2.1.104');
+}
+
+// ======================================================================
 //  Summary
 // ======================================================================
 restoreCache();

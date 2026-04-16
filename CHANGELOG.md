@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.19.0] - 2026-04-16
+
+### Changed — Stealth + robustness pass
+
+Ten targeted fixes across proxy and shim, combining a stealth audit (proxy vs. shim wire parity, behavioral fingerprints) with a broken-code/logic audit (unbounded buffers, path traversal, silent data loss). The common shape: every item was either a drift vector where proxy and shim emit different bytes for the same request, or a path where a malformed input could corrupt state instead of failing clean.
+
+**Stealth — wire parity and behavioral cadence.**
+
+- **Betas sourced from the live template (schema v2).** `src/proxy.ts` previously hardcoded the v2.1.104 `anthropic-beta` flag set (eight comma-separated flags). `src/shim/runtime.cjs` already read `tmpl.anthropic_beta` with a fallback string — so proxy and shim diverged the instant CC shipped a new beta. Proxy now loads `CC_TEMPLATE.anthropic_beta` identically and uses the same bundled-snapshot fallback. A CC beta-date bump propagates to both transports on the next fingerprint refresh, no dario release needed.
+- **Fingerprint schema v2 — `anthropic_beta` + `header_values`.** `src/live-fingerprint.ts` now captures CC's outbound `anthropic-beta` verbatim and a curated set of static header values (`user-agent`, `x-app`, `x-stainless-*`, `anthropic-version`). Excluded by construction: `authorization`, `content-type`/`content-length`/`host` (body-framing), `x-claude-code-session-id` / `x-client-request-id` (session-scoped), `anthropic-beta` (captured separately), `x-anthropic-billing-header` (rebuilt per-request from `cc_version`). `CURRENT_SCHEMA_VERSION` bumped 1 → 2; pre-v2 caches are dropped and rewritten on next refresh. The proxy's `staticHeaders` overlays `header_values` after its own defaults so any CC-side value nudge is replayed automatically.
+- **Single-account session stickiness.** `src/proxy.ts:98` previously rotated `SESSION_ID = randomUUID()` on every request, reasoning that "a persistent session ID is a behavioral fingerprint." Empirically the opposite: real CC rotates once per conversation, not per call, so a user with a distinct session-id per request looks nothing like a CC user. v3.19 keeps `SESSION_ID` stable across a conversation window (`SESSION_IDLE_ROTATE_MS = 15m`) and only rotates after an idle gap long enough to credibly indicate a new conversation. Pool mode still uses `poolAccount.identity.sessionId` (stable per account) — unchanged.
+- **FRAMEWORK_PATTERNS expansion.** Seven additional identifiers (`zed`, `plandex`, `tabby`, `amazon q`, `opencode`, `daytona`, `roo code`) added to the scrub list in `src/cc-template.ts`. Same word-boundary + path-preservation semantics as the existing set — stripped in prose, preserved inside paths and URLs (dario#35 still holds).
+- **Context-1m retry variance.** `src/proxy.ts:1078` rebuilt the reduced-beta header via `beta.replace(',context-1m-…','').replace('context-1m-…,','')` — a deterministic string-replace that leaves trailing-comma or ordering artifacts exploitable if the base set ever carries context-1m in multiple positions. Switched to `beta.split(',').filter(t => t !== 'context-1m-…').join(',')` — matches the skipContext1m fast-path exactly, and the retry shape is now byte-identical to a request that started without context-1m.
+
+**Broken-code/logic — unbounded buffers, silent truncation, path safety.**
+
+- **SSE line 413-reject.** `src/proxy.ts:1317` silently truncated SSE lines longer than 1MB with `buffer = buffer.slice(-MAX_LINE_LENGTH)`, which hid upstream protocol bugs (a runaway event stream indefinitely with the tail overwritten each chunk) and guaranteed a malformed JSON parse at the client. v3.19 emits an OpenAI-shape error marker, the `[DONE]` sentinel, and aborts the upstream read (`upstreamAbortReason = 'sse_overflow'`) so billing stops. Fails loud, fails once.
+- **BufferedToolBlock.partial size cap.** `src/cc-template.ts:1224` accumulated `input_json_delta` chunks per content block with no ceiling. A malformed upstream `tool_use` stream could OOM the proxy in-process. v3.19 caps at 2MB (`MAX_TOOL_PARTIAL_BYTES`) — on overflow, the accumulated bytes flush as a passthrough `content_block_delta`, the block is dropped from the buffered map, and subsequent deltas/stop events pass through unchanged. Client loses translation for that one block but the proxy doesn't starve.
+- **Envelope shape guard on `/v1/pool/borrow`.** `src/proxy.ts:613` forwarded `envelope.request` to Anthropic under the lender's identity without checking shape. Typed `unknown` on the wire — a borrower could waste a lender's rate-limit slot with a primitive, an array, or an object missing `model`/`messages`. v3.19 validates the minimum Anthropic `/v1/messages` shape (plain object, string `model`, array `messages`) before spending the slot; malformed envelopes get 400 locally. (Not SSRF — the upstream URL is a hardcoded `ANTHROPIC_API` constant.)
+- **Windows `.cmd`/`.bat` shell-char guard.** `src/live-fingerprint.ts` — `probeInstalledCCVersionUncached` and the fingerprint-capture spawn both use `shell: true` on Windows when the resolved binary ends in `.cmd`/`.bat` (Node 20+ / CVE-2024-27980 hardening requires it). Both paths now reject the binary if it contains any shell metacharacter (`& | > < ^ " ' % \r \n ` $ ; ( ) { } [ ]`) before spawning — `DARIO_CLAUDE_BIN` is user-controlled, so an override reaching the shell path could otherwise let cmd.exe interpret its contents.
+- **`path.basename` defense on account/backend file ops.** `src/accounts.ts` and `src/openai-backend.ts` previously joined caller-supplied alias/name directly into the filesystem path (`join(ACCOUNTS_DIR, '${alias}.json')`), so an alias like `../../etc/passwd` landed outside the accounts dir. v3.19 routes both through `safeAliasPath` / `safeBackendPath` — strips any directory component via `basename`, rejects `.`/`..`, enforces `^[A-Za-z0-9][A-Za-z0-9_\-.]{0,63}$`. CLI input was already constrained, but the module API is importable — defense in depth.
+
+### Added
+
+- **Test coverage for the schema-v2 capture, the tool-partial cap, and the expanded framework patterns.** `test/live-fingerprint.mjs` now has 16 additional assertions covering `_schemaVersion === 2`, verbatim `anthropic_beta` capture, inclusion of fingerprint-relevant static headers, and exclusion of every auth/body-framing/session-scoped key. `test/streaming-edge-cases.mjs` adds section 8 — a 2.2MB aggregate `input_json_delta` stream verifies the mapper flushes the full payload on overflow, emits `content_block_stop`, reaches `[DONE]`, and loses no bytes. `test/scrub-paths.mjs` adds 13 assertions across the new framework identifiers (prose-strip and path-preserve both directions).
+
+Total test footprint: **687 assertions across 20 files** (was ~640). Full `npm test` green.
+
+### Why this release
+
+v3.18 closed the contract gap between dario and Anthropic's schema validator. v3.19 closes the parity gap between dario's two transports (the hardcoded proxy path had drifted from the template-driven shim path across every CC beta-date bump since v3.13) and the failure-mode gap for malformed upstreams (silent SSE truncation, unbounded tool-input buffers, and path-traversal holes that all existed since the corresponding file's first commit). Every observable dario emits now comes from the live template or fails loud — no more hardcoded strings quietly diverging as CC upgrades, and no more degraded-but-silent paths where a bad upstream corrupts a good proxy.
+
+---
+
 ## [3.18.0] - 2026-04-16
 
 ### Fixed — Tool-schema contract audit (dario#43)

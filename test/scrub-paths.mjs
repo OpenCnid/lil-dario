@@ -86,6 +86,30 @@ assertEq(
   'prose stripped but path segment preserved in same string',
 );
 
+// v3.19 — expanded framework pattern set. Each new identifier must be
+// stripped in prose but preserved inside paths/URLs (same word-boundary
+// contract as the existing set).
+console.log('\n======================================================================');
+console.log('  v3.19 — new framework identifiers stripped in prose');
+console.log('======================================================================');
+assertEq(scrubFrameworkIdentifiers('launched via zed today'), 'launched via  today', 'zed stripped in prose');
+assertEq(scrubFrameworkIdentifiers('plandex generated this'), ' generated this', 'plandex stripped in prose');
+assertEq(scrubFrameworkIdentifiers('tabby suggested fix'), ' suggested fix', 'tabby stripped in prose');
+assertEq(scrubFrameworkIdentifiers('running Amazon Q flow'), 'running  flow', 'amazon q stripped in prose');
+assertEq(scrubFrameworkIdentifiers('opencode cli was here'), ' cli was here', 'opencode stripped in prose');
+assertEq(scrubFrameworkIdentifiers('spawned in daytona env'), 'spawned in  env', 'daytona stripped in prose');
+assertEq(scrubFrameworkIdentifiers('use Roo Code today'), 'use  today', 'roo code (space variant) stripped in prose');
+assertEq(scrubFrameworkIdentifiers('use roo-code today'), 'use  today', 'roo-code (dash variant) stripped in prose');
+
+console.log('\n======================================================================');
+console.log('  v3.19 — new identifiers preserved inside paths');
+console.log('======================================================================');
+assertEq(scrubFrameworkIdentifiers('/opt/zed/bin'), '/opt/zed/bin', 'zed preserved in path');
+assertEq(scrubFrameworkIdentifiers('~/.plandex/cache'), '~/.plandex/cache', 'plandex preserved in dotfile path');
+assertEq(scrubFrameworkIdentifiers('/usr/local/tabby/db'), '/usr/local/tabby/db', 'tabby preserved in path');
+assertEq(scrubFrameworkIdentifiers('https://opencode.ai/docs'), 'https://opencode.ai/docs', 'opencode preserved in URL');
+assertEq(scrubFrameworkIdentifiers('/var/daytona/workspace'), '/var/daytona/workspace', 'daytona preserved in path');
+
 console.log('\n======================================================================');
 console.log(`  ${pass} pass, ${fail} fail`);
 console.log('======================================================================\n');

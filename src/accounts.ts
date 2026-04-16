@@ -12,7 +12,7 @@
  * path already uses. No hardcoded client IDs here.
  */
 import { readFile, writeFile, mkdir, readdir, unlink, rename } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -20,6 +20,21 @@ import { detectCCOAuthConfig } from './cc-oauth-detect.js';
 
 const DARIO_DIR = join(homedir(), '.dario');
 const ACCOUNTS_DIR = join(DARIO_DIR, 'accounts');
+
+/**
+ * Normalize a caller-supplied alias into a filesystem-safe leaf name.
+ * Strips any directory component (traversal, absolute paths) and rejects
+ * aliases that don't match the allowed charset. CLI input is already
+ * constrained, but the accounts API is importable — defense in depth.
+ */
+function safeAliasPath(alias: string): string | null {
+  if (typeof alias !== 'string' || alias.length === 0) return null;
+  const leaf = basename(alias);
+  if (leaf !== alias) return null;
+  if (leaf === '.' || leaf === '..') return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_\-.]{0,63}$/.test(leaf)) return null;
+  return join(ACCOUNTS_DIR, `${leaf}.json`);
+}
 
 export interface AccountCredentials {
   alias: string;
@@ -46,7 +61,8 @@ export async function listAccountAliases(): Promise<string[]> {
 }
 
 export async function loadAccount(alias: string): Promise<AccountCredentials | null> {
-  const path = join(ACCOUNTS_DIR, `${alias}.json`);
+  const path = safeAliasPath(alias);
+  if (!path) return null;
   try {
     const raw = await readFile(path, 'utf-8');
     return JSON.parse(raw) as AccountCredentials;
@@ -62,8 +78,9 @@ export async function loadAllAccounts(): Promise<AccountCredentials[]> {
 }
 
 export async function saveAccount(creds: AccountCredentials): Promise<void> {
+  const path = safeAliasPath(creds.alias);
+  if (!path) throw new Error(`invalid account alias: ${creds.alias}`);
   await ensureDir();
-  const path = join(ACCOUNTS_DIR, `${creds.alias}.json`);
   const tmp = `${path}.tmp.${randomBytes(4).toString('hex')}`;
   await writeFile(tmp, JSON.stringify(creds, null, 2), { mode: 0o600 });
   try {
@@ -76,7 +93,8 @@ export async function saveAccount(creds: AccountCredentials): Promise<void> {
 }
 
 export async function removeAccount(alias: string): Promise<boolean> {
-  const path = join(ACCOUNTS_DIR, `${alias}.json`);
+  const path = safeAliasPath(alias);
+  if (!path) return false;
   try {
     await unlink(path);
     return true;

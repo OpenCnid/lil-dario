@@ -255,6 +255,70 @@ header('7. empty tool map returns a passthrough (noop) mapper');
   check('empty toolMap passthrough: input === output', out === sse);
 }
 
+// ======================================================================
+//  8. BufferedToolBlock.partial cap (v3.19). Oversized input_json_delta
+//     accumulation must not grow unbounded — once the cap is exceeded,
+//     the mapper flushes the accumulated partial as a passthrough delta
+//     and drops the block from the buffered map.
+// ======================================================================
+header('8. tool_use partial accumulation caps at 2MB and falls back to passthrough');
+{
+  const mapper = createStreamingReverseMapper(makeToolMap());
+  // 1.5MB of "x" in the first delta, 0.7MB in the second — aggregate
+  // exceeds MAX_TOOL_PARTIAL_BYTES (2MB). First delta buffers normally;
+  // second should tip over and flush.
+  const big1 = 'x'.repeat(1_500_000);
+  const big2 = 'y'.repeat(700_000);
+  const sse = [
+    `event: message_start`,
+    `data: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude-opus-4-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
+    ``,
+    `event: content_block_start`,
+    `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t_1","name":"Bash","input":{}}}`,
+    ``,
+    `event: content_block_delta`,
+    `data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"${big1}"}}`,
+    ``,
+    `event: content_block_delta`,
+    `data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"${big2}"}}`,
+    ``,
+    `event: content_block_stop`,
+    `data: {"type":"content_block_stop","index":0}`,
+    ``,
+    `data: [DONE]`,
+    ``,
+  ].join('\n');
+
+  let output = '';
+  output += dec.decode(mapper.feed(enc.encode(sse)), { stream: true });
+  output += dec.decode(mapper.end());
+
+  // The rewritten content_block_start changes the tool name to the client
+  // name (`exec`) with empty input — that comes out first.
+  check('rewritten tool name (exec) emitted on start', output.includes('"name":"exec"'));
+  // After cap hit, an input_json_delta passthrough is emitted carrying the
+  // concatenated partial. We don't assert the exact payload (2.2MB string),
+  // only that a content_block_delta event containing the partial_json type
+  // is present and that the combined "xy" payload shape appears in the
+  // stream (i.e., we didn't truncate and we didn't try to translateBack
+  // the huge JSON string which is invalid JSON anyway).
+  check('passthrough content_block_delta emitted on overflow',
+    output.includes('content_block_delta') &&
+    output.includes('input_json_delta'));
+  // The stop event must still reach the client — otherwise the tool call
+  // hangs open on their side forever.
+  check('content_block_stop passes through after overflow',
+    output.includes('content_block_stop'));
+  // Sanity: no exception thrown, stream reached [DONE].
+  check('stream reached [DONE] sentinel', output.includes('[DONE]'));
+  // Cap-triggered passthrough should carry the oversized payload, not a
+  // truncated prefix — verify the combined byte count of the passthrough
+  // delta's partial_json is >= 2.2MB (= big1 + big2).
+  const deltaMatch = output.match(/"partial_json":"(x+y+)"/);
+  check('flushed partial contains both oversized chunks',
+    deltaMatch !== null && deltaMatch[1].length === big1.length + big2.length);
+}
+
 // ----------------------------------------------------------------------
 // Helper: parse every data: line in an SSE string and verify it's
 // either [DONE] or valid JSON. Skips comment lines.

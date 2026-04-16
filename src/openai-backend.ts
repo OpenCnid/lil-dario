@@ -13,12 +13,26 @@
  * in a follow-up release.
  */
 import { readFile, writeFile, mkdir, unlink, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 const DARIO_DIR = join(homedir(), '.dario');
 const BACKENDS_DIR = join(DARIO_DIR, 'backends');
+
+/**
+ * Normalize a caller-supplied backend name into a filesystem-safe leaf.
+ * Strips any directory component and rejects names outside the allowed
+ * charset. Defense in depth — CLI input is already constrained.
+ */
+function safeBackendPath(name: string): string | null {
+  if (typeof name !== 'string' || name.length === 0) return null;
+  const leaf = basename(name);
+  if (leaf !== name) return null;
+  if (leaf === '.' || leaf === '..') return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_\-.]{0,63}$/.test(leaf)) return null;
+  return join(BACKENDS_DIR, `${leaf}.json`);
+}
 
 export interface BackendCredentials {
   provider: string;      // "openai"
@@ -50,13 +64,15 @@ export async function listBackends(): Promise<BackendCredentials[]> {
 }
 
 export async function saveBackend(creds: BackendCredentials): Promise<void> {
+  const path = safeBackendPath(creds.name);
+  if (!path) throw new Error(`invalid backend name: ${creds.name}`);
   await ensureDir();
-  const path = join(BACKENDS_DIR, `${creds.name}.json`);
   await writeFile(path, JSON.stringify(creds, null, 2), { mode: 0o600 });
 }
 
 export async function removeBackend(name: string): Promise<boolean> {
-  const path = join(BACKENDS_DIR, `${name}.json`);
+  const path = safeBackendPath(name);
+  if (!path) return false;
   try {
     await unlink(path);
     return true;

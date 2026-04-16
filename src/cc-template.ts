@@ -92,8 +92,9 @@ export function orderHeadersForOutbound(
 const FRAMEWORK_PATTERNS: RegExp[] = [
   // Compound/hyphenated patterns run first so their halves can't be eaten
   // by the simpler word-level patterns below.
-  /\b(roo[- ]?cline|big[- ]?agi|claude[- ]?bridge)\b/gi,
+  /\b(roo[- ]?cline|roo[- ]?code|big[- ]?agi|claude[- ]?bridge|amazon\s+q)\b/gi,
   /\b(openclaw|hermes|aider|cursor|windsurf|cline|continue|copilot|cody)\b/gi,
+  /\b(zed|plandex|tabby|opencode|daytona)\b/gi,
   /\b(librechat|typingmind)\b/gi,
   /\b(openai|gpt-4|gpt-3\.5)\b/gi,
   /powered by [a-z]+/gi,
@@ -1096,6 +1097,18 @@ interface BufferedToolBlock {
   partial: string;
 }
 
+/**
+ * Cap on how large we'll let a single tool_use block's `partial_json`
+ * accumulation grow before abandoning translation for that block and
+ * falling back to passthrough. Two megabytes accommodates the largest
+ * real tool inputs we've observed (Edit/Write with multi-file payloads)
+ * with headroom; beyond this the upstream is almost certainly malformed
+ * or adversarial and not worth buffering further. Unbounded growth was
+ * the hole — streaming runs in-process so a runaway input_json_delta
+ * would starve whatever else the proxy is serving.
+ */
+const MAX_TOOL_PARTIAL_BYTES = 2_000_000;
+
 export function createStreamingReverseMapper(
   toolMap: Map<string, ToolMapping>,
   ctx?: RequestContext,
@@ -1228,6 +1241,21 @@ export function createStreamingReverseMapper(
 
       const delta = event.delta as Record<string, unknown> | undefined;
       if (delta && delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+        // Cap per-block partial accumulation. If one more delta would
+        // blow the cap, flush what we have as a passthrough delta and
+        // drop the block from `buffered` — further deltas / the stop
+        // event fall through the "no buf" path and pass unchanged.
+        // The client loses translation for this one block, but avoids
+        // an unbounded in-memory string on a malformed upstream stream.
+        if (buf.partial.length + delta.partial_json.length > MAX_TOOL_PARTIAL_BYTES) {
+          const flushed = {
+            type: 'content_block_delta',
+            index: idx,
+            delta: { type: 'input_json_delta', partial_json: buf.partial + delta.partial_json },
+          };
+          buffered.delete(idx);
+          return buildEvent('content_block_delta', flushed);
+        }
         buf.partial += delta.partial_json;
         // Swallow the whole event group — including any `event:`
         // header line the upstream emitted for it — because we'll

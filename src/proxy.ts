@@ -93,9 +93,18 @@ function extractFirstUserMessage(body: Record<string, unknown>): string {
   return '';
 }
 
-// Session ID rotates per request — fresh UUID per invocation.
-// A persistent session ID across many requests is a behavioral fingerprint.
+// Session ID behavior (single-account mode):
+//   v3.18 rotated per request — which was itself a fingerprint. Real CC
+//   rotates roughly once per conversation, not per call. A user who has
+//   distinct session-ids for every request looks nothing like a CC user.
+//
+//   v3.19 keeps the id stable through a conversation window and rotates
+//   only after an idle gap long enough to credibly indicate a new
+//   conversation (SESSION_IDLE_ROTATE_MS). Pool mode still uses the
+//   per-account identity.sessionId (stable across the account's lifetime).
 let SESSION_ID = randomUUID();
+let SESSION_LAST_USED = 0;
+const SESSION_IDLE_ROTATE_MS = 15 * 60 * 1000;
 const OS_NAME = platform === 'win32' ? 'Windows' : platform === 'darwin' ? 'MacOS' : 'Linux';
 
 // Claude Code device identity — required for Max plan billing classification.
@@ -497,6 +506,18 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // Claude Code runs on Bun which reports v24.3.0 as Node compat version
     'x-stainless-runtime-version': 'v24.3.0',
   };
+  // Overlay captured header values from the live template (schema v2). This
+  // replaces the hardcoded stainless/user-agent constants with whatever CC
+  // actually emitted on the capture, so a CC release that nudges any of those
+  // values gets reflected automatically on the next template refresh.
+  // Excludes auth + body-framing + session-scoped keys by construction (see
+  // extractStaticHeaderValues in live-fingerprint.ts). No-op when the loaded
+  // template predates v2 or the bundled snapshot is in use.
+  if (!passthrough && CC_TEMPLATE.header_values) {
+    for (const [k, v] of Object.entries(CC_TEMPLATE.header_values)) {
+      staticHeaders[k] = v;
+    }
+  }
   let requestCount = 0;
   const semaphore = new Semaphore(MAX_CONCURRENT);
 
@@ -508,6 +529,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   // retry loop was firing on every POST with hybrid-tools + OC.
   const context1mUnavailable = new Set<string>();
   const ACCOUNT_KEY_SINGLE = '__default__';
+
+  // Beta flag set — sourced from the live template when the capture recorded
+  // one (schema v2+), else falls back to the v2.1.104 bundled default. Same
+  // fallback string shim/runtime.cjs uses (kept in sync so proxy and shim
+  // never diverge on the wire). Computed once per proxy because it's a
+  // function of the loaded template, not of the request.
+  const BETA_FALLBACK = 'claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24';
+  const betaBase = CC_TEMPLATE.anthropic_beta || BETA_FALLBACK;
+  const betaWithoutContext1m = betaBase.split(',').filter((t) => t !== 'context-1m-2025-08-07').join(',');
 
   // Rate governor — minimum 500ms between requests. Fast enough for agents,
   // slow enough to not look like a scripted flood of identical traffic.
@@ -614,6 +644,21 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       if (!envelope) {
         res.writeHead(400, JSON_HEADERS);
         res.end(JSON.stringify({ error: 'malformed borrow envelope' }));
+        return;
+      }
+      // Envelope shape guard — envelope.request is `unknown` on the wire.
+      // We stringify it and forward to Anthropic under the lender's identity,
+      // so a borrower could otherwise waste the lender's rate-limit slot with
+      // a body Anthropic will reject. Minimum: must be a plain object with
+      // `model` (string) and `messages` (array). Anthropic validates the rest.
+      const br = envelope.request;
+      if (
+        !br || typeof br !== 'object' || Array.isArray(br) ||
+        typeof (br as Record<string, unknown>).model !== 'string' ||
+        !Array.isArray((br as Record<string, unknown>).messages)
+      ) {
+        res.writeHead(400, JSON_HEADERS);
+        res.end(JSON.stringify({ error: 'envelope.request must be an Anthropic /v1/messages body' }));
         return;
       }
       if (envelope.groupId !== groupLender.groupId) {
@@ -753,7 +798,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // Hoisted so the finally block can clean up whatever was set.
     let upstreamTimeout: ReturnType<typeof setTimeout> | null = null;
     let onClientClose: (() => void) | null = null;
-    let upstreamAbortReason: 'timeout' | 'client_closed' | null = null;
+    let upstreamAbortReason: 'timeout' | 'client_closed' | 'sse_overflow' | null = null;
     try {
       // Pool mode: select an account by headroom. Single-account mode:
       // fall through to getAccessToken() exactly as before. Request-path
@@ -953,15 +998,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         beta = 'oauth-2025-04-20';
         if (clientBeta) beta += ',' + clientBeta;
       } else {
-        // CC v2.1.104 beta set — 8 flags in the order Claude Code sends them.
+        // Beta set sourced from the live template (schema v2). Bundled
+        // snapshots predating v3.19 leave anthropic_beta undefined, so fall
+        // back to the v2.1.104 flag set — matches shim/runtime.cjs's fallback.
         // context-1m requires Extra Usage — if it 400s, we auto-retry without
         // it, and cache the rejection so subsequent requests on this account
         // skip context-1m entirely (dario#36).
         const acctKey = poolAccount?.alias ?? ACCOUNT_KEY_SINGLE;
         const skipContext1m = context1mUnavailable.has(acctKey);
-        beta = skipContext1m
-          ? 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24'
-          : 'claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24';
+        beta = skipContext1m ? betaWithoutContext1m : betaBase;
         if (clientBeta) {
           const baseSet = new Set(beta.split(','));
           const filtered = filterBillableBetas(clientBeta)
@@ -978,10 +1023,18 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       }
       lastRequestTime = Date.now();
 
-      // Rotate session ID per request — fresh UUID avoids persistent-session fingerprinting.
-      // Pool mode uses the per-account identity.sessionId which is stable across
-      // a given account's lifetime; single-account mode rotates per request.
-      if (!poolAccount) SESSION_ID = randomUUID();
+      // Session ID: pool mode uses the per-account identity.sessionId (stable
+      // per account). Single-account mode keeps SESSION_ID stable through
+      // active conversations and rotates only after an idle gap that looks
+      // like a new conversation — matches CC's observed cadence (see note
+      // at SESSION_ID declaration).
+      if (!poolAccount) {
+        const nowTs = Date.now();
+        if (SESSION_LAST_USED === 0 || nowTs - SESSION_LAST_USED > SESSION_IDLE_ROTATE_MS) {
+          SESSION_ID = randomUUID();
+        }
+        SESSION_LAST_USED = nowTs;
+      }
       const outboundSessionId = poolAccount ? poolAccount.identity.sessionId : SESSION_ID;
 
       const headers: Record<string, string> = {
@@ -1075,7 +1128,13 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           const firstRejection = !context1mUnavailable.has(acctKey);
           context1mUnavailable.add(acctKey);
           if (verbose && firstRejection) console.log(`[dario] #${requestCount} context-1m rejected (${upstream.status}) — retrying without it (cached for session)`);
-          const reducedBeta = beta.replace(',context-1m-2025-08-07', '').replace('context-1m-2025-08-07,', '');
+          // Rebuild via array filter instead of string replace so the output
+          // is byte-identical to a request that started without context-1m
+          // (skipContext1m path above). A deterministic string-replace would
+          // leave the retry indistinguishable on content but divergent on
+          // whitespace/structure if betaBase ever gains non-context-1m tokens
+          // at the same position — keep the two paths funneled through one filter.
+          const reducedBeta = beta.split(',').filter((t) => t !== 'context-1m-2025-08-07').join(',');
           const retryHeaders = { ...headers, 'anthropic-beta': reducedBeta };
           const retry = await fetch(targetBase, {
             method: req.method ?? 'POST',
@@ -1313,9 +1372,25 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             if (isOpenAI) {
               // Translate Anthropic SSE → OpenAI SSE
               buffer += decoder.decode(value, { stream: true });
-              // Guard against unbounded buffer growth
+              // Reject oversized SSE lines instead of silently truncating.
+              // Truncation hid protocol bugs (a runaway upstream event would
+              // stream indefinitely with the tail rewritten each chunk) and
+              // guaranteed a malformed JSON parse at the client. Since we've
+              // already sent 200 and an SSE content-type, the cleanest exit
+              // is an error event in OpenAI shape + [DONE] sentinel + abort.
               if (buffer.length > MAX_LINE_LENGTH) {
-                buffer = buffer.slice(-MAX_LINE_LENGTH);
+                if (verbose) console.warn(`[dario] #${requestCount} SSE line exceeded ${MAX_LINE_LENGTH}B — aborting stream`);
+                const errPayload = JSON.stringify({
+                  error: {
+                    message: `Upstream SSE line exceeded ${MAX_LINE_LENGTH} bytes`,
+                    type: 'upstream_protocol_error',
+                  },
+                });
+                res.write(`data: ${errPayload}\n\n`);
+                res.write('data: [DONE]\n\n');
+                upstreamAbortReason = 'sse_overflow';
+                upstreamAbort.abort();
+                break;
               }
               const lines = buffer.split('\n');
               buffer = lines.pop() ?? '';
