@@ -6,11 +6,19 @@
  */
 
 import { randomBytes, createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { detectCCOAuthConfig } from './cc-oauth-detect.js';
+
+// Manual-flow redirect URI. Anthropic's authorize endpoint special-cases
+// this value (also baked into CC as MANUAL_REDIRECT_URL) to render the
+// authorization code + state on a copy-paste success page instead of
+// redirecting back to a localhost callback. Used by startManualOAuthFlow
+// for container / headless / SSH installs where a local bind won't work.
+const MANUAL_REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback';
 
 // OAuth config is auto-detected at runtime from the installed Claude Code
 // binary. This eliminates the "Anthropic rotated the client_id again" class
@@ -352,6 +360,173 @@ async function exchangeCodeWithRedirect(code: string, codeVerifier: string, stat
 
   await saveCredentials({ claudeAiOauth: tokens });
   return tokens;
+}
+
+/**
+ * Build the authorize URL used by the manual / headless flow. Exported
+ * so tests can assert the shape (code=true, MANUAL_REDIRECT_URI, PKCE)
+ * without exercising the full interactive flow.
+ */
+export function buildManualAuthorizeUrl(
+  cfg: { clientId: string; authorizeUrl: string; scopes: string },
+  codeChallenge: string,
+  state: string,
+): string {
+  const params = new URLSearchParams({
+    code: 'true',
+    client_id: cfg.clientId,
+    response_type: 'code',
+    redirect_uri: MANUAL_REDIRECT_URI,
+    scope: cfg.scopes,
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+    state,
+  });
+  return `${cfg.authorizeUrl}?${params.toString()}`;
+}
+
+/**
+ * Parse whatever the user pastes back from Anthropic's success page.
+ *
+ * The success page renders the authorization code and state joined with
+ * a `#` (the fragment-identifier convention CC itself uses for its
+ * `claude setup-token` flow), so the happy-path paste is `code#state`.
+ * Some browsers / copy UIs strip the fragment, so we also accept a bare
+ * code. When state is present, callers should verify it matches the
+ * state they generated; when absent, callers can prompt separately or
+ * accept the trade-off (code + PKCE + client_id are still verified on
+ * the token exchange).
+ */
+export function parseManualPaste(input: string): { code: string; state: string | null } {
+  const trimmed = input.trim();
+  if (!trimmed) return { code: '', state: null };
+  const hashIdx = trimmed.indexOf('#');
+  if (hashIdx === -1) return { code: trimmed, state: null };
+  return {
+    code: trimmed.slice(0, hashIdx).trim(),
+    state: trimmed.slice(hashIdx + 1).trim(),
+  };
+}
+
+/**
+ * Heuristic for "dario is probably running somewhere the local-callback
+ * OAuth flow won't work because the browser is on a different host."
+ * Returns a short reason string when the heuristic fires, null otherwise.
+ *
+ * Callers use this to *offer* `--manual` to the user, never to force it —
+ * false positives are more annoying than false negatives (the user can
+ * always opt in explicitly).
+ */
+export function detectHeadlessEnvironment(): string | null {
+  if (process.env.SSH_CLIENT || process.env.SSH_TTY || process.env.SSH_CONNECTION) {
+    return 'SSH session detected';
+  }
+  try {
+    if (existsSync('/.dockerenv')) {
+      return 'container detected (/.dockerenv)';
+    }
+    if (existsSync('/proc/1/cgroup')) {
+      const cg = readFileSync('/proc/1/cgroup', 'utf-8');
+      if (/\b(docker|containerd|lxc|kubepods)\b/.test(cg)) {
+        return 'container detected (cgroup)';
+      }
+    }
+  } catch { /* best-effort — /proc is Linux-only, absence is fine */ }
+  return null;
+}
+
+/**
+ * Manual / headless OAuth flow (dario #43).
+ *
+ * Mirrors Claude Code's own `claude setup-token` flow: asks Anthropic to
+ * display the authorization code as text instead of redirecting to a
+ * local callback server, then reads the code the user copies back.
+ * Works for container installs (browser on host, dario in container),
+ * SSH installs (no browser on the remote box), and any other setup
+ * where a localhost redirect can't reach the dario process.
+ *
+ * Security posture is unchanged from the auto flow: PKCE + client_id +
+ * single-use code + server-side code expiry. State parameter is
+ * verified when the pasted input includes it; bare-code pastes still
+ * exchange because state isn't load-bearing for the token endpoint
+ * (it's CSRF protection for a redirect we don't have here).
+ */
+export async function startManualOAuthFlow(): Promise<OAuthTokens> {
+  const { codeVerifier, codeChallenge } = generatePKCE();
+  const state = base64url(randomBytes(16));
+  const cfg = await getOAuthConfig();
+  const authUrl = buildManualAuthorizeUrl(cfg, codeChallenge, state);
+
+  console.log('');
+  console.log('  Open this URL in any browser (on any machine):');
+  console.log('');
+  console.log(`    ${authUrl}`);
+  console.log('');
+  console.log('  After you approve, Anthropic will display an authorization code.');
+  console.log('  Paste it below (format: "code#state" or just the code).');
+  console.log('');
+
+  const pasted = await readLineFromStdin('  Code: ');
+  const { code, state: returnedState } = parseManualPaste(pasted);
+
+  if (!code) {
+    throw new Error('No authorization code entered. Re-run `dario login --manual`.');
+  }
+
+  if (returnedState && returnedState !== state) {
+    throw new Error('State mismatch — the pasted code is from a different login attempt. Re-run `dario login --manual` and paste the most recent code.');
+  }
+
+  return exchangeCodeManual(code, codeVerifier, state);
+}
+
+async function exchangeCodeManual(code: string, codeVerifier: string, state: string): Promise<OAuthTokens> {
+  const cfg = await getOAuthConfig();
+  const res = await fetch(cfg.tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      grant_type: 'authorization_code',
+      client_id: cfg.clientId,
+      code,
+      redirect_uri: MANUAL_REDIRECT_URI,
+      code_verifier: codeVerifier,
+      state,
+    }),
+    signal: AbortSignal.timeout(30000),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Token exchange failed (HTTP ${res.status}): ${body.slice(0, 200)}`);
+  }
+
+  const data = await res.json() as {
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+    scope?: string;
+  };
+
+  const tokens: OAuthTokens = {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    expiresAt: Date.now() + data.expires_in * 1000,
+    scopes: data.scope?.split(' ') || ['user:inference'],
+  };
+
+  await saveCredentials({ claudeAiOauth: tokens });
+  return tokens;
+}
+
+async function readLineFromStdin(prompt: string): Promise<string> {
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(prompt)).trim();
+  } finally {
+    rl.close();
+  }
 }
 
 /**

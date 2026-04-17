@@ -36,7 +36,7 @@ if (!('Bun' in globalThis) && !process.env.DARIO_NO_BUN) {
 import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { startAutoOAuthFlow, getStatus, refreshTokens, loadCredentials } from './oauth.js';
+import { startAutoOAuthFlow, startManualOAuthFlow, detectHeadlessEnvironment, getStatus, refreshTokens, loadCredentials } from './oauth.js';
 import { startProxy, sanitizeError } from './proxy.js';
 import { listAccountAliases, loadAllAccounts, addAccountViaOAuth, removeAccount } from './accounts.js';
 import { listBackends, saveBackend, removeBackend, type BackendCredentials } from './openai-backend.js';
@@ -49,6 +49,8 @@ async function login() {
   console.log('  dario — Claude Login');
   console.log('  ───────────────────');
   console.log('');
+
+  const manualFlag = args.includes('--manual') || args.includes('--headless');
 
   // Check for existing credentials (Claude Code or dario's own)
   const creds = await loadCredentials();
@@ -83,8 +85,22 @@ async function login() {
     console.log('');
   }
 
+  // If the user didn't explicitly pick `--manual`, surface a hint when
+  // heuristics suggest the local-callback flow won't work (SSH session,
+  // container). We don't auto-flip — false positives would be more
+  // annoying than false negatives — but the hint keeps users from
+  // waiting for a browser redirect that can't land.
+  if (!manualFlag) {
+    const reason = detectHeadlessEnvironment();
+    if (reason) {
+      console.log(`  Note: ${reason}. If the browser redirect doesn't land,`);
+      console.log('  re-run with: dario login --manual');
+      console.log('');
+    }
+  }
+
   try {
-    const tokens = await startAutoOAuthFlow();
+    const tokens = manualFlag ? await startManualOAuthFlow() : await startAutoOAuthFlow();
     const expiresIn = Math.round((tokens.expiresAt - Date.now()) / 60000);
 
     console.log('  Login successful!');
@@ -93,9 +109,14 @@ async function login() {
     console.log('  Run `dario proxy` to start the API proxy.');
     console.log('');
   } catch (err) {
+    const msg = sanitizeError(err);
     console.error('');
-    console.error(`  Login failed: ${sanitizeError(err)}`);
-    console.error('  Try again with `dario login`.');
+    console.error(`  Login failed: ${msg}`);
+    if (!manualFlag && /callback server|EADDRINUSE|bind|timed out/i.test(msg)) {
+      console.error('  Hint: try `dario login --manual` for headless / container setups.');
+    } else {
+      console.error('  Try again with `dario login`.');
+    }
     process.exit(1);
   }
 }
@@ -403,7 +424,10 @@ async function help() {
   dario — Use your Claude subscription as an API.
 
   Usage:
-    dario login              Detect credentials + start proxy (or run OAuth)
+    dario login [--manual]   Detect credentials + start proxy (or run OAuth)
+                             --manual (alias: --headless) for container / SSH
+                             setups — prints an authorize URL and reads the
+                             code you paste back instead of a local redirect
     dario proxy [options]    Start the API proxy server
     dario status             Check authentication status
     dario refresh            Force token refresh

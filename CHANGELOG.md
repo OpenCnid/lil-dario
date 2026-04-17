@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.20.0] - 2026-04-17
+
+### Added — Manual / headless OAuth flow (`dario login --manual`, dario#43)
+
+dario's OAuth flow binds a local HTTP callback on the dario host (`http://localhost:${port}/callback`) and redirects the browser back to it after consent. That works for desktop installs but breaks in two common setups: **containers** (dario in a container, browser on the host — redirect lands on the wrong host) and **headless / SSH** installs (dario on a remote box with no browser, user has a browser on their laptop). Surfaced by @adubkov in dario#28 (docker-compose with `--host=0.0.0.0 --port=30000`); previous workaround was running `dario login` on a desktop and rsync'ing `~/.dario/` onto the headless box.
+
+- **`dario login --manual`** (alias `--headless`) — mirrors Claude Code's own `claude setup-token` flow. Sends `code=true` + `redirect_uri=https://platform.claude.com/oauth/code/callback` on the authorize URL, so Anthropic renders the authorization code on a copy-paste success page instead of redirecting. dario reads the pasted code from stdin, verifies state (when present; Anthropic's success page returns `code#state`), and exchanges it against the token endpoint with the same PKCE `code_verifier`. Browser and dario can run on different hosts, different networks, or across an SSH jump.
+- **Heuristic hint before the auto flow.** When `--manual` isn't set but `detectHeadlessEnvironment()` fires — `SSH_CLIENT` / `SSH_TTY` / `SSH_CONNECTION` env vars, `/.dockerenv` present, or `/proc/1/cgroup` matches `docker|containerd|lxc|kubepods` — `dario login` prints a one-liner suggesting `--manual` before starting the auto flow. No auto-pivot: false positives are more annoying than false negatives; the user can always ignore the hint if their specific setup happens to forward the redirect.
+- **Hint on auto-flow bind failure.** When `startAutoOAuthFlow` rejects with `Failed to start OAuth callback server` / `EADDRINUSE` / `timed out`, the error output now includes `Hint: try dario login --manual for headless / container setups.`
+- **Help text updated.** `dario login [--manual]` with a one-sentence explanation of when to use it.
+
+Security posture unchanged from the auto flow: PKCE + `client_id` + single-use code + server-side code expiry. State is verified when the pasted input includes it; bare-code pastes (some browsers / copy UIs strip the `#fragment`) still exchange because state isn't load-bearing for the token endpoint (it's CSRF protection for a redirect we don't have in the manual path — the user is pasting their own code, not being redirected anywhere dario controls).
+
+### Added — Test coverage
+
+- **`test/manual-oauth-flow.mjs`** — 30 new assertions: authorize-URL shape (9 params including `code=true` and `MANUAL_REDIRECT_URI`), regression guard that manual flow doesn't re-request the `org:create_api_key` scope Anthropic rejected in dario#42, paste parser across `code#state` / bare / whitespace / empty / leading-# / multi-# inputs, SSH env-var detection (`SSH_CLIENT`, `SSH_TTY`, `SSH_CONNECTION`) with save/restore, and a negative/positive branch for the container cgroup check (CI runs containerized; test accepts either the null or the legitimate `container detected` branch).
+
+Total test footprint: **758 assertions across 22 files** (was 728). Full `npm test` green.
+
+### Why this release
+
+Containers and SSH installs were the last common setup dario couldn't unblock without friction. The "rsync `~/.dario/` from a desktop" workaround worked but required users to have *two* machines with dario installed, which is backwards for a tool whose value prop is "run it on the box that needs the API proxy." The manual flow is the same PKCE handshake Anthropic already supports for CC's own headless login — dario just wasn't surfacing it. No behavior change for desktop users: the auto flow is still the default and the heuristic hint is silent on machines that aren't SSH-ing or containerized.
+
 ## [3.19.5] - 2026-04-17
 
 ### Changed — `SUPPORTED_CC_RANGE.maxTested` bumped to `2.1.112` (dario#44)
