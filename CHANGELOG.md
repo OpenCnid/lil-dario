@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.22.0] - 2026-04-17
+
+### Added — Request body field order replay (fingerprint-tightening)
+
+Every top-level key in the outbound `/v1/messages` body is a potential fingerprint: JSON is semantically unordered as a type but the wire serialization IS ordered, and two bodies with the same fields in different order produce different bytes. Up through v3.21 dario tried to match CC's order by hand — `buildCCRequest` in `src/cc-template.ts` built the object literal with `model, messages, system, tools, metadata, max_tokens, thinking, context_management, output_config, stream` and a comment saying "matches CC v2.1.104 exactly." That comment is the problem: every time CC reshuffles the order or adds a field (like `output_config` did silently), dario's hardcoded order lags until someone notices and ships a point release. v3.22 replaces the hand-maintained order with one captured from the live binary.
+
+- **`src/live-fingerprint.ts` — `body_field_order` field on `TemplateData` (schema v3).** The live-capture extractor now runs `Object.keys(captured.body)` on the parsed request body and stores the result. Because V8 preserves insertion order for string keys (ES2015+) and the capture reads from JSON that was already parsed in order, the resulting array is a faithful record of CC's wire order. `CURRENT_SCHEMA_VERSION` bumps from 2 → 3; pre-v3 caches (`~/.dario/cc-template.live.json`) are rejected at load time by the existing `_schemaVersion !== CURRENT_SCHEMA_VERSION` check and the next background refresh writes a fresh one — no migration, no quarantine (schema-mismatch is an expected version-transition state).
+- **`src/cc-template.ts` — `orderBodyForOutbound(body, overrideOrder?)`.** Reorders a built body to match a captured order. Mirrors `orderHeadersForOutbound`'s contract with one intentional difference: keys are case-sensitive (JSON keys are case-sensitive, unlike HTTP headers), and the return is a plain `Record` instead of an array of pairs — `JSON.stringify` walks string keys in insertion order so the record form is sufficient to reach the wire ordered. Missing captured names are skipped (never emitted as `undefined`), duplicates are deduped (first wins), and caller-supplied extras are appended at the tail in insertion order so a future Anthropic-added field isn't silently dropped by a stale capture.
+- **`src/cc-template.ts` — `buildCCRequest` applies the replay.** The hardcoded object-literal build is kept as a deterministic fallback; `orderBodyForOutbound(ccRequest)` runs just before the function returns, so when the template has `body_field_order` the outbound key sequence matches the captured order exactly. When `body_field_order` is undefined (pre-v3.22 bundle or live cache miss), the passthrough path returns the input reference-equal — no behavior change, no overhead.
+- **Re-captured `src/cc-template-data.json` against CC v2.1.112.** The baked fallback now carries `body_field_order: ["model", "messages", "system", "tools", "metadata", "max_tokens", "thinking", "context_management", "output_config", "stream"]`, which happens to match the hardcoded build order (v2.1.112 hasn't reshuffled), so this release is a no-op on the wire for existing installs — the value is in the mechanism, not the data.
+
+### Added — Test coverage
+
+- **`test/proxy-body-order.mjs`** — 29 new assertions across 9 sections: empty-order reference-equal passthrough, captured-order preservation with `Object.keys` + `JSON.stringify` walk verification, case-sensitive matching (unlike headers — `Model` and `model` are distinct), extras-at-tail with insertion-order preservation, absent-captured-name skipping (never synthesized as `undefined`), duplicate-name dedup, empty-caller-record edge, falsy-value preservation (`0`, `false`, `''`, `null` must not be stripped by a naive truthiness check), and idempotence (`reorder(reorder(x))` is byte-identical to `reorder(x)`).
+- **`test/live-fingerprint.mjs` §"Schema v3"** — 2 new assertions + 1 updated: `_schemaVersion === 3` (was `=== 2`), `body_field_order` is an array, `body_field_order` captures the top-level keys in the caller-supplied insertion order. The prior schema-v2 section heading retitled to schema-v3 inline.
+
+Total test footprint: **842 assertions across 24 files** (was 811). Net +31: +29 from `test/proxy-body-order.mjs`, +2 from `test/live-fingerprint.mjs`. Full `npm test` green.
+
+### Why this release
+
+The deferred v3.13 roadmap item (comment at `src/live-fingerprint.ts:72-79`) called out request body field order as a known fingerprint axis that was still on "hope CC doesn't change it" footing. v3.22 closes that loop: the order is now a captured-and-replayed property rather than a hand-maintained constant, the drift watcher's existing `template.version` check catches order drift as a byproduct of the version bump, and future CC releases that add or reshuffle a top-level field (the most recent precedent: `output_config` added somewhere in the v2.1.10x series) get picked up by the next live refresh without a dario release. Part of the broader "get ahead of Anthropic" push that started with v3.19's `header_order` capture.
+
 ## [3.21.0] - 2026-04-17
 
 ### Added — Baked template scrubber + re-capture (dario#45)

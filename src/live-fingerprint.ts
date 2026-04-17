@@ -100,7 +100,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * wrong behavior if loaded verbatim. Mismatched caches are rejected at
  * load time so the fallback + next background refresh write a fresh one.
  */
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 export interface TemplateData {
   _version: string;
@@ -136,6 +136,18 @@ export interface TemplateData {
    * (x-claude-code-session-id, x-client-request-id). Schema v2.
    */
   header_values?: Record<string, string>;
+  /**
+   * Top-level JSON key order from the captured /v1/messages body, in the
+   * order CC emitted them. JSON is unordered as a type but the wire
+   * serialization IS ordered — every field in the body is a potential
+   * fingerprint if the order differs from CC's. Schema v3 (v3.22).
+   *
+   * Previously the proxy hardcoded the order as a comment in buildCCRequest;
+   * replaying from the live capture means bumping CC's field order (or
+   * adding a new field like `output_config`) no longer requires a dario
+   * release. Falls back to the hardcoded build order when undefined.
+   */
+  body_field_order?: string[];
 }
 
 const LIVE_CACHE = join(homedir(), '.dario', 'cc-template.live.json');
@@ -553,6 +565,10 @@ export function extractTemplate(captured: CapturedRequest): TemplateData | null 
   const headerOrder = extractHeaderOrder(captured.rawHeaders);
   const anthropicBeta = captured.headers['anthropic-beta'];
   const headerValues = extractStaticHeaderValues(captured.headers);
+  // Top-level body key order — JSON is unordered semantically, but the
+  // wire serialization has order. Captured from Object.keys on the parsed
+  // body, which preserves insertion order (ES2015+).
+  const bodyFieldOrder = extractBodyFieldOrder(captured.body);
 
   return {
     _version: version,
@@ -566,7 +582,19 @@ export function extractTemplate(captured: CapturedRequest): TemplateData | null 
     header_order: headerOrder,
     anthropic_beta: typeof anthropicBeta === 'string' ? anthropicBeta : undefined,
     header_values: Object.keys(headerValues).length > 0 ? headerValues : undefined,
+    body_field_order: bodyFieldOrder,
   };
+}
+
+/**
+ * Capture the top-level key order of a parsed body. Returns undefined when
+ * the object is empty or not an object, so the reorder helper in
+ * cc-template.ts falls back to its hardcoded build order.
+ */
+function extractBodyFieldOrder(body: Record<string, unknown> | undefined): string[] | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const keys = Object.keys(body);
+  return keys.length > 0 ? keys : undefined;
 }
 
 /**

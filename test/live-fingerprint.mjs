@@ -387,9 +387,9 @@ header('readLiveCache — schema mismatch does NOT quarantine (expected version-
 process.stderr.write = originalStderrWrite;
 
 // ======================================================================
-//  Schema v2 (v3.19) — anthropic_beta + header_values captured from request
+//  Schema v3 (v3.22) — anthropic_beta + header_values + body_field_order
 // ======================================================================
-header('extractTemplate — anthropic_beta + header_values (schema v2)');
+header('extractTemplate — anthropic_beta + header_values + body_field_order (schema v3)');
 {
   const captured = {
     method: 'POST',
@@ -434,7 +434,11 @@ header('extractTemplate — anthropic_beta + header_values (schema v2)');
     },
   };
   const t = _extractTemplateForTest(captured);
-  check('_schemaVersion === 2', t?._schemaVersion === 2);
+  check('_schemaVersion === 3', t?._schemaVersion === 3);
+  check('body_field_order is an array',
+    Array.isArray(t?.body_field_order));
+  check('body_field_order captures top-level keys in insertion order',
+    JSON.stringify(t?.body_field_order) === JSON.stringify(['system', 'tools']));
   check('anthropic_beta captured verbatim',
     t?.anthropic_beta === 'claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07');
   check('header_values is an object', typeof t?.header_values === 'object' && t?.header_values !== null);

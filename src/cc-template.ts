@@ -87,6 +87,56 @@ export function orderHeadersForOutbound(
   return ordered;
 }
 
+/**
+ * Reorder a top-level JSON request body's keys to match the captured CC
+ * wire order. JSON is unordered as a type but the serialization IS ordered
+ * — two requests with the same fields but different key order produce
+ * different bytes on the wire and are trivial to fingerprint.
+ *
+ * Unlike headers, JSON object keys are case-sensitive and V8 preserves
+ * insertion order for string keys (ES2015+), so a plain Record is
+ * sufficient — `JSON.stringify` walks it in insertion order.
+ *
+ * Contract:
+ * - If the template has no body_field_order or the override is empty,
+ *   the input is returned reference-equal (passthrough for pre-v3.22
+ *   baked templates and for test hermeticity).
+ * - Captured-order names that are missing from the caller's body are
+ *   skipped — never emitted as `undefined`.
+ * - Duplicate names in the captured order are deduped; first occurrence
+ *   wins.
+ * - Caller-supplied keys not in the captured order are appended at the
+ *   tail in insertion order, so a future Anthropic-added field doesn't
+ *   get silently dropped by a stale capture.
+ *
+ * @param body outbound request body the builder produced
+ * @param overrideOrder test-only override; production callers pass nothing
+ */
+export function orderBodyForOutbound(
+  body: Record<string, unknown>,
+  overrideOrder?: string[] | undefined,
+): Record<string, unknown> {
+  const order = overrideOrder !== undefined ? overrideOrder : TEMPLATE.body_field_order;
+  if (!Array.isArray(order) || order.length === 0) {
+    return body;
+  }
+  const ordered: Record<string, unknown> = {};
+  const seen = new Set<string>();
+  for (const name of order) {
+    if (seen.has(name)) continue;
+    if (Object.prototype.hasOwnProperty.call(body, name)) {
+      ordered[name] = body[name];
+      seen.add(name);
+    }
+  }
+  for (const k of Object.keys(body)) {
+    if (!seen.has(k)) {
+      ordered[k] = body[k];
+    }
+  }
+  return ordered;
+}
+
 // Framework identifiers that would flag non-CC usage. Stripped from the system
 // prompt and from message content text blocks before the request goes upstream.
 const FRAMEWORK_PATTERNS: RegExp[] = [
@@ -991,7 +1041,14 @@ export function buildCCRequest(
 
   ccRequest.stream = stream;
 
-  return { body: ccRequest, toolMap: activeToolMap, unmappedTools, detectedClient };
+  // Replay the captured top-level key order. The hardcoded build order above
+  // matches CC v2.1.104 and is kept as a deterministic fallback; when a live
+  // (or baked post-v3.22) template has body_field_order, the helper reorders
+  // to match that. Future CC releases that reshuffle or add a field are then
+  // picked up by the next live refresh without a dario release.
+  const orderedBody = orderBodyForOutbound(ccRequest);
+
+  return { body: orderedBody, toolMap: activeToolMap, unmappedTools, detectedClient };
 }
 
 /**
