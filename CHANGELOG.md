@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.20.1] - 2026-04-17
+
+### Added — `--no-auto-detect` opt-out for text-tool-client auto-preserve (dario#40)
+
+v3.19.3 shipped auto-detection that flips dario into preserve-tools mode when the incoming system prompt looks like Cline / Kilo Code / Roo Code, because the alternative (CC tools in the outbound `tools` array + the client's XML protocol in the system prompt) makes the model emit `<function_calls><invoke>` that those clients can't parse. Auto-preserve fixes the edit-fail symptom but changes one field of the outbound fingerprint (the `tools` array), and @ringge raised a fair concern: operators using dario specifically for stealth/fingerprint reasons may prefer to *keep* the CC fingerprint intact and pick `--preserve-tools` per session when they need it, rather than having dario auto-flip based on a heuristic.
+
+- **`src/cli.ts` — `--no-auto-detect`** (alias `--no-auto-preserve`). When set on `dario proxy`, the text-tool-client detector is short-circuited: `detectTextToolClient()` isn't called, `detectedClient` is always `undefined`, `effectivePreserveTools` is whatever the operator explicitly chose. Explicit `--preserve-tools` still wins (explicit operator choice outranks everything); `--hybrid-tools` is unaffected (already outranked the detector).
+- **`src/cc-template.ts` — `buildCCRequest` opts extended with `noAutoDetect?: boolean`.** The detector call is gated on `!opts.noAutoDetect`. When the flag is set on a Cline/Kilo/Roo prompt, the outbound `tools` array becomes the CC canonical set (not the client's schema), which is what the operator asked for — the trade-off is that text-tool clients will see `<function_calls><invoke>` in the model output and their parsers will reject edits. Users opt into that trade-off consciously.
+- **`src/proxy.ts` — `StartProxyOptions.noAutoDetect`** threaded from CLI → proxy → `buildCCRequest`.
+- **Help text** — `--no-auto-detect` documented under Proxy options with the trade-off spelled out inline.
+
+### Added — Test coverage
+
+- **`test/client-detection.mjs` §9** — 6 new assertions: detector skipped when `noAutoDetect: true` fires on a Cline prompt, outbound tools land on CC canonical (tool name no longer `execute_command`), `noAutoDetect` + explicit `preserveTools` → preserved (explicit wins), `noAutoDetect` on a plain (undetected) client is a no-op regression guard.
+
+Total test footprint: **764 assertions across 22 files** (was 758). Full `npm test` green.
+
+### Why this release
+
+dario#40's fingerprint concern deserves an explicit operator escape hatch, not just "pick `--hybrid-tools` instead" (hybrid has its own session-injection semantics you may not want). `--no-auto-detect` is the narrow, purpose-built flag: disable only the heuristic, keep every other v3.19.3 behavior. Default is unchanged — auto-detect still fires out of the box, because that's still the right default for users who haven't thought about fingerprint trade-offs.
+
 ## [3.20.0] - 2026-04-17
 
 ### Added — Manual / headless OAuth flow (`dario login --manual`, dario#43)

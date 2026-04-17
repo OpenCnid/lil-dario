@@ -706,7 +706,7 @@ export function buildCCRequest(
   billingTag: string,
   cache1h: { type: 'ephemeral'; ttl: '1h' },
   identity: { deviceId: string; accountUuid: string; sessionId: string },
-  opts: { preserveTools?: boolean; hybridTools?: boolean } = {},
+  opts: { preserveTools?: boolean; hybridTools?: boolean; noAutoDetect?: boolean } = {},
 ): { body: Record<string, unknown>; toolMap: Map<string, ToolMapping>; unmappedTools: string[]; detectedClient?: string } {
 
   const model = clientBody.model as string || 'claude-sonnet-4-6';
@@ -721,8 +721,15 @@ export function buildCCRequest(
   // brand name is still present, decide whether to auto-switch into
   // preserve-tools behavior below. Explicit --hybrid-tools outranks the
   // heuristic (operator opt-in wins). dario#40.
+  //
+  // `noAutoDetect` skips the detector entirely — operators who want the
+  // full CC fingerprint restored (tools array included) even when their
+  // client is Cline/Kilo/Roo can opt out. They keep explicit control via
+  // --preserve-tools per session. dario#40 (ringge's fingerprint concern).
   const rawSystemForDetection = extractSystemText(clientBody);
-  const detectedClient = detectTextToolClient(rawSystemForDetection) ?? undefined;
+  const detectedClient = opts.noAutoDetect
+    ? undefined
+    : (detectTextToolClient(rawSystemForDetection) ?? undefined);
   const autoPreserve = Boolean(detectedClient) && !opts.hybridTools;
   const effectivePreserveTools = Boolean(opts.preserveTools) || autoPreserve;
 

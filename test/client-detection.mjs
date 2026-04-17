@@ -173,5 +173,30 @@ const arrayBuilt = buildCCRequest(arraySystemBody, billingTag, cache1h, identity
 check('array-form system → detectedClient === "kilo"', arrayBuilt.detectedClient === 'kilo');
 check('array-form + Kilo → tools preserved', arrayBuilt.body.tools === clineTools);
 
+// ────────────────────────────────────────────────────────────────────
+header('9. buildCCRequest — --no-auto-detect disables the detector');
+
+// dario#40, ringge: operators who want the full CC fingerprint intact
+// (tools array included) can opt out of v3.19.3's auto-preserve behavior
+// even when the client's system prompt would trigger detection. Explicit
+// --preserve-tools per session still works; this flag only affects the
+// heuristic auto-switch.
+const noDetectBuilt = buildCCRequest(clineClientBody, billingTag, cache1h, identity, { noAutoDetect: true });
+check('noAutoDetect → detectedClient === undefined (detector skipped)', noDetectBuilt.detectedClient === undefined);
+check('noAutoDetect → tools === CC canonical set (not preserved)', noDetectBuilt.body.tools === CC_TOOL_DEFINITIONS);
+check('noAutoDetect → tools[0].name is a CC tool, not "execute_command"', noDetectBuilt.body.tools?.[0]?.name !== 'execute_command');
+
+// noAutoDetect + explicit preserveTools: preserveTools still wins
+// (explicit operator choice outranks everything).
+const noDetectPreserveBuilt = buildCCRequest(clineClientBody, billingTag, cache1h, identity, { noAutoDetect: true, preserveTools: true });
+check('noAutoDetect + preserveTools → tools preserved (explicit wins)', noDetectPreserveBuilt.body.tools === clineTools);
+
+// noAutoDetect on a plain client is a no-op regression guard: default
+// behavior (CC canonical tools) stays the same whether or not the flag
+// is set, because nothing was going to be detected anyway.
+const noDetectPlainBuilt = buildCCRequest(plainClientBody, billingTag, cache1h, identity, { noAutoDetect: true });
+check('noAutoDetect on plain client → CC canonical (no-op)', noDetectPlainBuilt.body.tools === CC_TOOL_DEFINITIONS);
+check('noAutoDetect on plain client → detectedClient still undefined', noDetectPlainBuilt.detectedClient === undefined);
+
 console.log(`\n${pass} pass, ${fail} fail`);
 process.exit(fail === 0 ? 0 : 1);

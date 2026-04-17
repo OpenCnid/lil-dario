@@ -202,10 +202,15 @@ async function proxy() {
     console.error('[dario] --preserve-tools and --hybrid-tools are mutually exclusive. Pick one.');
     process.exit(1);
   }
+  // Opt-out for v3.19.3's text-tool-client auto-detection. Operators who
+  // want the full CC fingerprint restored (tools array included) even
+  // when Cline/Kilo/Roo is detected can pass --no-auto-detect; they keep
+  // explicit control with --preserve-tools per session. dario#40 (ringge).
+  const noAutoDetect = args.includes('--no-auto-detect') || args.includes('--no-auto-preserve');
   const modelArg = args.find(a => a.startsWith('--model='));
   const model = modelArg ? modelArg.split('=')[1] : undefined;
 
-  await startProxy({ port, host, verbose, verboseBodies, model, passthrough, preserveTools, hybridTools });
+  await startProxy({ port, host, verbose, verboseBodies, model, passthrough, preserveTools, hybridTools, noAutoDetect });
 }
 
 async function accounts() {
@@ -456,6 +461,11 @@ async function help() {
                              Loses subscription routing; use for custom agents
     --hybrid-tools           Remap to CC tools, inject sessionId/requestId/etc.
                              Keeps subscription routing for custom agents
+    --no-auto-detect         Disable Cline/Kilo/Roo auto-preserve-tools
+                             (v3.19.3 behavior). Keeps CC fingerprint
+                             intact even when a text-tool client is
+                             detected; use --preserve-tools per session
+                             when edits are needed. (dario#40)
     --port=PORT              Port to listen on (default: 3456)
     --host=ADDRESS           Address to bind to (default: 127.0.0.1)
                              Use 0.0.0.0 for LAN; see README for DARIO_API_KEY

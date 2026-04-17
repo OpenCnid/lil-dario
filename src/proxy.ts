@@ -338,6 +338,7 @@ interface ProxyOptions {
   passthrough?: boolean;  // Thin proxy — OAuth swap only, no injection
   preserveTools?: boolean;  // Keep client tool schemas (for agents with custom tools)
   hybridTools?: boolean;    // Remap to CC tools but inject request-context fields on return (#33)
+  noAutoDetect?: boolean;   // Disable text-tool-client auto-detection (dario#40, ringge — keep CC fingerprint)
 }
 
 export function sanitizeError(err: unknown): string {
@@ -1010,6 +1011,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               {
                 preserveTools: opts.preserveTools ?? false,
                 hybridTools: opts.hybridTools ?? false,
+                noAutoDetect: opts.noAutoDetect ?? false,
               },
             );
 
