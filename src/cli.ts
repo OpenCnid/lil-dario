@@ -207,10 +207,16 @@ async function proxy() {
   // when Cline/Kilo/Roo is detected can pass --no-auto-detect; they keep
   // explicit control with --preserve-tools per session. dario#40 (ringge).
   const noAutoDetect = args.includes('--no-auto-detect') || args.includes('--no-auto-preserve');
+  // --strict-tls refuses to start proxy mode when the process's TLS stack
+  // doesn't match Claude Code's (i.e. we're on Node without Bun). Opt-in
+  // hard guardrail for operators who want certainty that the JA3 the
+  // proxy presents to Anthropic is Bun's BoringSSL ClientHello, not
+  // Node's OpenSSL one. v3.23 (direction #3).
+  const strictTls = args.includes('--strict-tls');
   const modelArg = args.find(a => a.startsWith('--model='));
   const model = modelArg ? modelArg.split('=')[1] : undefined;
 
-  await startProxy({ port, host, verbose, verboseBodies, model, passthrough, preserveTools, hybridTools, noAutoDetect });
+  await startProxy({ port, host, verbose, verboseBodies, model, passthrough, preserveTools, hybridTools, noAutoDetect, strictTls });
 }
 
 async function accounts() {
@@ -466,6 +472,13 @@ async function help() {
                              intact even when a text-tool client is
                              detected; use --preserve-tools per session
                              when edits are needed. (dario#40)
+    --strict-tls             Refuse to start proxy mode if this process
+                             isn't running under Bun. Bun is what Claude
+                             Code uses; matching its TLS stack keeps the
+                             proxy's JA3/JA4 ClientHello indistinguishable
+                             from a stock CC request. Install Bun
+                             (https://bun.sh) so dario auto-relaunches
+                             under it, or use shim mode. (v3.23)
     --port=PORT              Port to listen on (default: 3456)
     --host=ADDRESS           Address to bind to (default: 127.0.0.1)
                              Use 0.0.0.0 for LAN; see README for DARIO_API_KEY

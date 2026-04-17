@@ -100,6 +100,26 @@ export async function runChecks(): Promise<Check[]> {
     detail: `${platform()} ${arch()} (${release()})`,
   });
 
+  // ---- Runtime TLS fingerprint (v3.23, direction #3)
+  // Proxy mode terminates TLS in this process, so Bun-vs-Node is a
+  // fingerprint axis Anthropic can read directly off the wire.
+  try {
+    const { detectRuntimeFingerprint } = await import('./runtime-fingerprint.js');
+    const rt = detectRuntimeFingerprint();
+    const status: CheckStatus = rt.status === 'bun-match' ? 'ok' : 'warn';
+    checks.push({
+      status,
+      label: 'Runtime / TLS',
+      detail: rt.hint ? `${rt.detail}. ${rt.hint}` : rt.detail,
+    });
+  } catch (err) {
+    checks.push({
+      status: 'warn',
+      label: 'Runtime / TLS',
+      detail: `check failed: ${(err as Error).message}`,
+    });
+  }
+
   // ---- CC binary
   const cc = safely(() => findInstalledCC(), { path: null, version: null });
   if (cc.path && cc.version) {

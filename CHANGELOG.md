@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.23.0] - 2026-04-17
+
+### Added — Runtime / TLS-fingerprint axis visibility (direction #3)
+
+Proxy mode terminates TLS to `api.anthropic.com` from dario's own process, which means the ClientHello Anthropic sees is whichever runtime dario is on. Claude Code is a Bun-compiled binary, so its ClientHello is Bun's BoringSSL shape (distinct JA3/JA4 hash). Dario already auto-relaunches under Bun when Bun is on `PATH` — but when Bun isn't installed, that relaunch is a silent no-op and proxy mode quietly emits Node's OpenSSL ClientHello with no indication to the operator. v3.23 closes that blind spot: the runtime mismatch is now a first-class check with an opt-in hard guardrail.
+
+- **`src/runtime-fingerprint.ts` — `classifyRuntimeFingerprint` + `detectRuntimeFingerprint`.** Pure classifier over three inputs (`runningUnderBun`, `availableBunVersion`, `env`) so tests can exercise every combination without touching the real environment. Distinguishes three states: `bun-match` (ok — TLS matches CC), `bun-bypassed` (Node, Bun on PATH, auto-relaunch didn't fire — usually because `DARIO_NO_BUN` is set or the auto-relaunch was suppressed), and `node-only` (Node, Bun not installed — the silent mismatch case). Each state carries a human-readable `detail` + an actionable `hint`. `probeBunVersion` wraps `execFileSync('bun', ['--version'])` with a 3s timeout and output sanity checks so an unrelated `bun` binary can't poison detection.
+- **`src/doctor.ts` — new "Runtime / TLS" check.** Reports the classification between the Platform and CC-binary rows. `ok` on bun-match, `warn` otherwise with the hint inlined. Users running `dario doctor` now see the TLS axis the same way they see OAuth, pool, template drift, etc.
+- **`src/proxy.ts` — startup banner.** When `startProxy` boots under anything other than bun-match, the classification prints to stderr alongside the existing template / drift / compat warnings. Silence for known-fine environments with `DARIO_QUIET_TLS=1`.
+- **`src/proxy.ts` — `--strict-tls` flag.** Opt-in hard guardrail: refuses to start proxy mode when the classification isn't `bun-match`. For operators who want certainty that the JA3 their proxy presents to Anthropic matches Claude Code's. Omit the flag to keep the existing permissive behavior (warn-and-continue).
+
+### Added — Test coverage
+
+- **`test/runtime-fingerprint.mjs`** — 31 new assertions across 7 sections: bun-match with a version, bun-match without a version (runtime identification matters, not the version string), node-with-Bun → bun-bypassed (bypass reason defaults to `unknown`), `DARIO_NO_BUN` set → bypass reason = `DARIO_NO_BUN` + hint targets the env var, node-without-Bun → node-only (hint targets the Bun install URL and shim as the alternative, detail mentions JA3 divergence), env-not-mutated invariant (classifier is pure over its input), `DARIO_NO_BUN` set but Bun not installed still classifies as node-only (the env var is not a bypass when there's nothing to bypass).
+
+Total test footprint: **873 assertions across 25 files** (was 842). Full `npm test` green.
+
+### Why this release
+
+Direction #3 from the "get ahead of Anthropic" roadmap. Shim mode runs inside CC's own process, so its TLS stack is CC's by construction — no gap. Proxy mode is the divergent case, and the divergence was invisible to operators prior to v3.23. Making it visible doesn't *close* the gap (that needs a lower-level ClientHello rewrite, held back by the zero-runtime-deps policy), but it turns the silent axis into one operators can see and decide to act on. `--strict-tls` gives users who care an all-or-nothing knob; the default permissive behavior keeps backward compatibility. Directions #6 (behavioral smoothing) and #5 (streaming-consumption telemetry) follow in subsequent releases.
+
 ## [3.22.0] - 2026-04-17
 
 ### Added — Request body field order replay (fingerprint-tightening)

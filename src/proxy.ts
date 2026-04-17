@@ -339,6 +339,7 @@ interface ProxyOptions {
   preserveTools?: boolean;  // Keep client tool schemas (for agents with custom tools)
   hybridTools?: boolean;    // Remap to CC tools but inject request-context fields on return (#33)
   noAutoDetect?: boolean;   // Disable text-tool-client auto-detection (dario#40, ringge — keep CC fingerprint)
+  strictTls?: boolean;      // Refuse to start if not running under Bun (v3.23, direction #3)
 }
 
 export function sanitizeError(err: unknown): string {
@@ -385,6 +386,22 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const host = opts.host ?? process.env.DARIO_HOST ?? DEFAULT_HOST;
   const verbose = opts.verbose ?? false;
   const passthrough = opts.passthrough ?? false;
+
+  // TLS-fingerprint axis (v3.23, direction #3). Proxy mode terminates TLS
+  // to api.anthropic.com from this process; if we're not on Bun, the
+  // ClientHello that reaches Anthropic is Node's OpenSSL shape, not CC's
+  // Bun/BoringSSL shape. `--strict-tls` turns this silent divergence into
+  // a startup refusal. Doctor + the always-on banner below surface the
+  // same information without aborting, for users who know they're fine
+  // (API-key billing, single-call invocations, shim-mode-elsewhere, etc.).
+  const { detectRuntimeFingerprint } = await import('./runtime-fingerprint.js');
+  const runtimeFp = detectRuntimeFingerprint();
+  if (opts.strictTls && runtimeFp.status !== 'bun-match') {
+    console.error(`[dario] --strict-tls: ${runtimeFp.detail}`);
+    if (runtimeFp.hint) console.error(`[dario]   → ${runtimeFp.hint}`);
+    console.error('[dario] refusing to start proxy mode. Omit --strict-tls to run anyway.');
+    process.exit(1);
+  }
   // Text-tool-protocol client families that have already logged a
   // "detected → auto-enabling preserve-tools" banner this session.
   // Set once on first sighting per family so the startup log stays
@@ -1644,6 +1661,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const compat = checkCCCompat();
   if (compat.status === 'below-min' || compat.status === 'untested-above') {
     console.log(`[dario] ⚠  CC compat: ${compat.message}`);
+  }
+
+  // TLS-fingerprint banner (v3.23). Proxy mode terminates TLS from this
+  // process, so the Bun-vs-Node runtime choice is actually on the wire.
+  // Silence via DARIO_QUIET_TLS=1 for known-fine environments.
+  if (runtimeFp.status !== 'bun-match' && process.env.DARIO_QUIET_TLS !== '1') {
+    console.log(`[dario] ⚠  TLS fingerprint: ${runtimeFp.detail}`);
+    if (runtimeFp.hint) console.log(`[dario]    → ${runtimeFp.hint}`);
+    console.log('[dario]    (silence with DARIO_QUIET_TLS=1, or use --strict-tls to hard-fail)');
   }
 
   // Kick off a live fingerprint refresh in the background. Re-captures the
