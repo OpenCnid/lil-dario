@@ -28,9 +28,10 @@
  * "MANUAL_REDIRECT_URL" on platform.claude.com is only used when dario's
  * local HTTP server can't bind a port; dario never hits that path.)
  *
- * Results are cached per-binary-hash at ~/.dario/cc-oauth-cache-v2.json so
- * startup only re-scans when the user upgrades Claude Code. The -v2 suffix
- * invalidates the v3.4.0-v3.4.2 caches that held the wrong (dev) client_id.
+ * Results are cached per-binary-hash at ~/.dario/cc-oauth-cache-v4.json so
+ * startup only re-scans when the user upgrades Claude Code. The cache suffix
+ * is bumped each time scope handling or the fallback config changes, so
+ * upgrading dario picks up the new values without a manual cache clear.
  */
 
 import { readFile, writeFile, mkdir, stat, open as openFile } from 'node:fs/promises';
@@ -56,24 +57,26 @@ const FALLBACK: DetectedOAuthConfig = {
   clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
   authorizeUrl: 'https://claude.com/cai/oauth/authorize',
   tokenUrl: 'https://platform.claude.com/v1/oauth/token',
-  // Scopes are the full `n36` union from the CC binary, which is the value
-  // sent during a normal `claude login` (non-setup-token) flow. In CC's
-  // source: `let D = f ? [TI] : n36` where `f = inferenceOnly` (true only
-  // for `claude setup-token`). Normal interactive login uses the 6-scope
-  // union including `org:create_api_key` — even though that scope is named
-  // "Console-only" by convention, CC's own login flow requests it up front.
-  // Earlier dario versions (3.2.7 through 3.4.3) dropped `org:create_api_key`
-  // from the list based on a misread of the name; the dev-only client_id
-  // was lenient enough to accept the shorter list, the prod client_id is not.
-  scopes: 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload',
+  // Scopes match CC v2.1.107+ interactive login: the 5-scope user-only set.
+  // Between CC v2.1.104 and v2.1.107, Anthropic's authorize endpoint flipped
+  // its policy on `org:create_api_key` for this client_id — the shorter list
+  // is now the only accepted one, and the 6-scope form returns "Invalid
+  // request format". CC's own binary dropped `org:create_api_key` from the
+  // `n36` union to match. Dario #42 (tetsuco, 2026-04-17) surfaced this as
+  // a fresh-login failure on macOS against CC v2.1.107.
+  //
+  // History: dario 3.2.7–3.4.3 once dropped this scope by mistake (misread
+  // of the "Console-only" name); 3.4.4 added it back after users hit auth
+  // failures with the dev client_id accepting it but prod rejecting. That
+  // situation has now inverted — prod rejects the longer list.
+  scopes: 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload',
   source: 'fallback',
 };
 
-// -v3 suffix invalidates v3.4.3 caches that were populated with the wrong
-// 4-scope list (the scanner's regex matched a help-message string literal
-// in the CC binary instead of the real scope array). See the scanner's
-// scope handling below for why scope detection is no longer attempted.
-const CACHE_PATH = join(homedir(), '.dario', 'cc-oauth-cache-v3.json');
+// -v4 suffix invalidates v3.x caches populated with the 6-scope list that
+// Anthropic now rejects (dario #42). On upgrade, users regenerate the cache
+// with the new FALLBACK scopes automatically — no manual clear required.
+const CACHE_PATH = join(homedir(), '.dario', 'cc-oauth-cache-v4.json');
 
 function candidatePaths(): string[] {
   const home = homedir();

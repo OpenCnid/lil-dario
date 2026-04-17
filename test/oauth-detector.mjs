@@ -26,7 +26,7 @@ import { readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-const CACHE_PATH = join(homedir(), '.dario', 'cc-oauth-cache-v3.json');
+const CACHE_PATH = join(homedir(), '.dario', 'cc-oauth-cache-v4.json');
 const PROD_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const DEAD_DEV_CLIENT_ID = '22422756-60c9-4084-8eb7-27705fd5cf9a';
 
@@ -82,16 +82,16 @@ async function main() {
     pass: cfg1.scopes.includes('user:inference'),
   });
   checks.push({
-    name: 'scopes include org:create_api_key (part of n36 union sent by normal claude login)',
-    pass: cfg1.scopes.includes('org:create_api_key'),
+    name: 'scopes do NOT include org:create_api_key (Anthropic rejects it for CC client_id since v2.1.107 — dario #42)',
+    pass: !cfg1.scopes.includes('org:create_api_key'),
   });
   checks.push({
     name: 'scopes include user:file_upload (missing from v3.4.3 scanner output due to regex picking up help-message literal)',
     pass: cfg1.scopes.includes('user:file_upload'),
   });
   checks.push({
-    name: 'scopes contain exactly 6 items (full n36 union)',
-    pass: cfg1.scopes.split(/\s+/).length === 6,
+    name: 'scopes contain exactly 5 items (user-only n36 union post-v2.1.107)',
+    pass: cfg1.scopes.split(/\s+/).length === 5,
   });
 
   // Prove the PROD config block context: find the prod-specific anchor

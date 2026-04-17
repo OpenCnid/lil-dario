@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.19.4] - 2026-04-17
+
+### Fixed — `dario login` fails with "Invalid request format" on CC v2.1.107+ (dario#42)
+
+Between CC v2.1.104 and v2.1.107, Anthropic's authorize endpoint inverted its policy on the `org:create_api_key` scope for CC's prod client_id (`9d1c250a-e61b-44d9-88ed-5944d1962f5e`): the 6-scope list that dario's `FALLBACK` had been sending since v3.4.4 is now rejected with "Invalid request format", and the 5-scope user-only set (the one CC v2.1.107's own binary requests) is the only one accepted. dario#42 (tetsuco) surfaced this as a fresh-login failure on macOS — the authorize URL in the browser returned an Anthropic error before the user could ever complete consent.
+
+- **Drop `org:create_api_key` from `FALLBACK.scopes` in `src/cc-oauth-detect.ts`.** Fallback scope list now matches CC v2.1.107's n36 union: `user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`. The scanner already extracts values from the installed binary when possible; `FALLBACK` only kicks in when the binary is missing or unscannable. History comment rewritten to reflect the policy inversion (prior note warned against dropping this scope; that warning is now inverted).
+- **Bump cache path `cc-oauth-cache-v3.json` → `cc-oauth-cache-v4.json`.** On upgrade, users regenerate the cache with the new scope list automatically — no manual `rm ~/.dario/cc-oauth-cache-v3.json` required. README and SECURITY references follow the bump.
+- **`test/oauth-detector.mjs` scope assertions inverted.** The test that previously demanded `scopes.includes('org:create_api_key')` now asserts its absence; the expected scope count dropped from 6 to 5.
+
+### Fixed — `dario login` silently burns fresh OAuth flows when refresh would have worked (dario#42, secondary)
+
+The old login flow printed `No Claude Code credentials found. Starting OAuth flow...` in two different situations: no credentials at all, and credentials present but expired. The second case was common (any long-running proxy session that didn't refresh in time) and the fresh OAuth flow it triggered was wasteful — the existing refresh token would have worked. Worse, users reading the "not found" message assumed their credentials had been deleted somewhere.
+
+- **`src/cli.ts login()` now attempts `refreshTokens()` before falling through to `startAutoOAuthFlow()`** when credentials exist but `expiresAt < Date.now()` and a `refreshToken` is present. On success, it reports the new expiry and exits; on failure, it reports why refresh failed (redacted via `sanitizeError`) and then proceeds to the OAuth flow. The fresh-OAuth fallthrough message is only printed when there are genuinely no credentials.
+
+### Why this release
+
+#42 was an outright blocker for new installs on current CC: the login URL dario generated was rejected by Anthropic before the user could see the consent page, with a generic error message that looked like a dario bug and had no actionable fix. The root cause was a policy flip on Anthropic's side that matched CC's own binary change, so the fix is mechanical — bring `FALLBACK.scopes` in line with what CC v2.1.107 actually sends. The refresh-before-fresh-flow change is a small UX correction that only bit users whose credentials had expired, but it was confusing them into deleting their `~/.dario/credentials.json` thinking something was wrong.
+
 ## [3.19.3] - 2026-04-17
 
 ### Fixed — Cline/Kilo/Roo tool calls appear as generic XML in client UI (dario#40)

@@ -565,7 +565,7 @@ Yes — anything that speaks the OpenAI Chat Completions API. Groq, OpenRouter, 
 `dario doctor`. One command, one aggregated report — dario version, Node, platform, CC binary compat, template source + age + drift, OAuth status, pool state, backends, home dir. Exit code 1 if any check fails. Paste the output when you file an issue.
 
 **What happens when Anthropic rotates the OAuth config?**
-Dario auto-detects OAuth config from the installed Claude Code binary. When CC ships a new version with rotated values, dario picks them up on the next run. Cache at `~/.dario/cc-oauth-cache-v3.json`, keyed by the CC binary fingerprint.
+Dario auto-detects OAuth config from the installed Claude Code binary. When CC ships a new version with rotated values, dario picks them up on the next run. Cache at `~/.dario/cc-oauth-cache-v4.json`, keyed by the CC binary fingerprint.
 
 **What happens when Anthropic changes the CC request template?**
 Dario extracts the live request template from your installed Claude Code binary on startup — the system prompt, tool schemas, user-agent, beta flags, and header insertion order — and uses those to replay requests instead of a version pinned into dario itself. When CC ships a new version with a tweaked template, the next `dario proxy` run picks it up automatically. Drift detection (v3.17) forces a refresh when the installed CC version changes under dario.

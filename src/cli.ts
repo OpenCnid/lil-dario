@@ -59,8 +59,29 @@ async function login() {
     return;
   }
 
-  console.log('  No Claude Code credentials found. Starting OAuth flow...');
-  console.log('');
+  // Credentials exist but are expired — try refresh before falling through
+  // to a fresh OAuth flow. Without this, dario silently burned every
+  // fresh-login attempt (surfaced by dario #42 when Anthropic's authorize
+  // endpoint started rejecting the 6-scope list and `dario login` kept
+  // reporting "No credentials found" even though refresh would have worked).
+  if (creds?.claudeAiOauth?.refreshToken) {
+    console.log('  Existing credentials expired — attempting token refresh...');
+    try {
+      const tokens = await refreshTokens();
+      const expiresIn = Math.round((tokens.expiresAt - Date.now()) / 60000);
+      console.log(`  Refresh successful! Token expires in ${expiresIn} minutes.`);
+      console.log('');
+      console.log('  Run `dario proxy` to start the API proxy.');
+      console.log('');
+      return;
+    } catch (err) {
+      console.log(`  Refresh failed (${sanitizeError(err)}). Starting fresh OAuth flow...`);
+      console.log('');
+    }
+  } else {
+    console.log('  No Claude Code credentials found. Starting OAuth flow...');
+    console.log('');
+  }
 
   try {
     const tokens = await startAutoOAuthFlow();

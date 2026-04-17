@@ -59,7 +59,7 @@ The following are in scope for security reports:
 - Reads the local Claude Code binary (`~/.local/bin/claude.exe`, `~/.claude/local/node_modules/@anthropic-ai/claude-code/cli.js`, etc.) in read-only mode to extract OAuth `client_id`, authorize URL, token URL, and scopes.
 - Never modifies, executes, or transmits the binary.
 - Anchors on `BASE_API_URL:"https://api.anthropic.com"` — a literal that only appears inside CC's prod OAuth config block — then extracts `CLIENT_ID`, `CLAUDE_AI_AUTHORIZE_URL`, `TOKEN_URL`, and the full scope list from the surrounding object. A defensive check rejects any scan result matching a known-dead internal `client_id` (see the v3.4.3 CHANGELOG entry for the history).
-- Cached at `~/.dario/cc-oauth-cache-v3.json` keyed by binary fingerprint (sha256 of first 64KB + size + mtime); cache file contains no secrets. Cache version bumped to `-v3` in v3.4.4 — prior `-v2` and un-suffixed caches are invalidated automatically on upgrade.
+- Cached at `~/.dario/cc-oauth-cache-v4.json` keyed by binary fingerprint (sha256 of first 64KB + size + mtime); cache file contains no secrets. Cache version bumped to `-v4` in v3.19.4 when Anthropic's authorize endpoint stopped accepting `org:create_api_key` for the CC client_id — prior caches are invalidated automatically on upgrade.
 - Falls back to hardcoded known-good Claude Code 2.1.104 prod config values if no binary is found or scanning fails — dario remains functional.
 
 ### Proxy Security
