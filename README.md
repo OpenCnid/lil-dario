@@ -26,7 +26,7 @@ One command, one local URL, every provider behind it. Point `ANTHROPIC_BASE_URL`
 - `llama-3.3-70b`, `deepseek-v3`, anything else → **Groq**, **OpenRouter**, **local LiteLLM**, **vLLM**, **Ollama**, whichever OpenAI-compat backend you wired up
 - Force a backend explicitly with a prefix: `openai:gpt-4o`, `groq:llama-3.3-70b`, `local:qwen-coder`, `claude:opus`
 
-Switching providers is a **model-name change** in your tool. Not a reconfigure. Not new base URLs. Not new API keys. Not a new SDK import. **Zero runtime dependencies. ~7,600 lines of TypeScript across ~15 files. ~640 assertions across 20 test suites. [SLSA-attested](https://www.npmjs.com/package/@askalf/dario) on every release. Nothing phones home, ever.**
+Switching providers is a **model-name change** in your tool. Not a reconfigure. Not new base URLs. Not new API keys. Not a new SDK import. **Zero runtime dependencies. ~8,100 lines of TypeScript across ~15 files. ~840 assertions across 24 test suites. [SLSA-attested](https://www.npmjs.com/package/@askalf/dario) on every release. Nothing phones home, ever.**
 
 ---
 
@@ -88,7 +88,7 @@ Something broken? `dario doctor` prints a single aggregated health report — da
 
 **You hit rate limits on long agent runs.** Add a second / third Claude subscription with `dario accounts add work` and pool mode routes each request to whichever account has the most headroom. **Session stickiness** (v3.13.0) pins a multi-turn conversation to one account so the Anthropic prompt cache survives the run. **In-flight 429 failover** retries the same request against a different account before your client sees an error. See [Multi-account pool mode](#multi-account-pool-mode).
 
-**You run a coding agent that isn't Claude Code.** Cline, Roo Code, Cursor, Windsurf, Continue.dev, GitHub Copilot, OpenHands, OpenClaw, Hermes — they each ship their own tool schemas and their own validators. Dario's universal `TOOL_MAP` (**71 entries as of v3.15**) pre-maps every major coding agent's tool names to Claude Code's native set on the outbound path and rebuilds to your agent's exact expected shape on the inbound path. No `--preserve-tools`, no fingerprint loss, no validator errors. See [Agent compatibility](#agent-compatibility).
+**You run a coding agent that isn't Claude Code.** Cline, Roo Code, Cursor, Windsurf, Continue.dev, GitHub Copilot, OpenHands, OpenClaw, Hermes — they each ship their own tool schemas and their own validators. Dario's universal `TOOL_MAP` (**~66 schema-verified entries**) pre-maps every major coding agent's tool names to Claude Code's native set on the outbound path and rebuilds to your agent's exact expected shape on the inbound path. No `--preserve-tools`, no fingerprint loss, no validator errors. See [Agent compatibility](#agent-compatibility).
 
 **You want the proxy layer off the wire entirely.** **Shim mode** (v3.12, hardened in v3.13) is an in-process `globalThis.fetch` patch injected via `NODE_OPTIONS=--require`. No HTTP hop, no port to bind, no `BASE_URL` to set. `dario shim -- claude --print "hi"` and CC thinks it's talking directly to `api.anthropic.com`. See [Shim mode](#shim-mode).
 
@@ -156,11 +156,11 @@ Force a backend with a **provider prefix** on the model field (`openai:gpt-4o`, 
 
 OAuth-backed Claude Max / Pro, billed against your plan instead of the API. Activated by `dario login`.
 
-**What it does.** Every outbound Claude request is rebuilt to look exactly like a request Claude Code itself would make — system prompt, tool definitions, fingerprint headers, billing tag, beta flags, **even the exact header insertion order** — using a live-extracted template from your actually-installed CC binary that self-heals on every Anthropic release. Anthropic's classifier sees a CC session because, from the wire up, it *is* one. That's what keeps your usage on subscription billing instead of API overage.
+**What it does.** Every outbound Claude request is rebuilt to look exactly like a request Claude Code itself would make — system prompt, tool definitions, fingerprint headers, billing tag, beta flags, **even the exact header insertion order and request-body key order** — using a live-extracted template from your actually-installed CC binary that self-heals on every Anthropic release. Anthropic's classifier sees a CC session because, from the wire up, it *is* one. That's what keeps your usage on subscription billing instead of API overage.
 
 **Key mechanisms:**
 
-- **Live fingerprint extraction** (v3.11). Dario spawns your installed `claude` binary against a loopback MITM endpoint on startup, captures its outbound request, and extracts the live template (system prompt, tools, user-agent, beta flags, **header insertion order** as of v3.13, replayed on the wire by the shim since v3.13 and the proxy since v3.16). Eliminates the "Anthropic ships a new CC, dario is stale for 48 hours" window. Cached at `~/.dario/cc-template.live.json` with a 24h TTL. Falls back to the bundled snapshot if CC isn't installed.
+- **Live fingerprint extraction** (v3.11). Dario spawns your installed `claude` binary against a loopback MITM endpoint on startup, captures its outbound request, and extracts the live template (system prompt, tools, user-agent, beta flags, **header insertion order** as of v3.13 replayed by the shim since v3.13 and the proxy since v3.16, **static header values** + **`anthropic-beta` flags** as of v3.19, and **top-level request-body key order** as of v3.22). Eliminates the "Anthropic ships a new CC, dario is stale for 48 hours" window. Cached at `~/.dario/cc-template.live.json` with a 24h TTL. Falls back to the bundled snapshot if CC isn't installed; the bundled snapshot is scrubbed of host-identifying paths at bake time (v3.21).
 - **Drift detection** (v3.17). On startup dario probes the installed `claude` binary and compares against the captured template. Mismatch triggers a forced refresh and prints a one-line warning. Users never silently sit on a stale template again.
 - **Compat matrix** (v3.17). `SUPPORTED_CC_RANGE = { min: "1.0.0", maxTested: "2.1.104" }` is encoded in code. Installed CC outside that band prints a warn (untested above) or fail (below min) — zero-dep dotted-numeric comparator, no `semver` import per the dep policy.
 - **Billing tag** reconstructed using CC's own algorithm: `x-anthropic-billing-header: cc_version=<version>.<build_tag>; cc_entrypoint=cli; cch=<5-char-hex>;` where `build_tag = SHA-256(seed + chars[4,7,20] of user message + version).slice(0,3)`.
@@ -272,7 +272,7 @@ Under the hood: `dario shim` spawns the child with `NODE_OPTIONS=--require <dari
 
 ## Agent compatibility
 
-As of **v3.18**, dario's built-in `TOOL_MAP` carries **~65 schema-verified entries** covering the tool schemas of every major coding agent. On the Claude backend, tool calls translate to CC's native `Bash / Read / Write / Edit / Glob / Grep / WebSearch / WebFetch` on the outbound path (keeping the subscription fingerprint intact) and rebuild to your agent's exact expected shape on the inbound path (so your validator is happy). No flag required.
+As of **v3.22**, dario's built-in `TOOL_MAP` carries **~66 schema-verified entries** covering the tool schemas of every major coding agent. On the Claude backend, tool calls translate to CC's native `Bash / Read / Write / Edit / Glob / Grep / WebSearch / WebFetch` on the outbound path (keeping the subscription fingerprint intact) and rebuild to your agent's exact expected shape on the inbound path (so your validator is happy). No flag required.
 
 | Agent | Covered tool names (subset) |
 |---|---|
@@ -515,11 +515,11 @@ Dario handles your OAuth tokens and API keys locally. Here's why you can trust i
 
 | Signal | Status |
 |---|---|
-| **Source code** | ~7,600 lines of TypeScript across ~15 files — small enough to audit in a weekend |
+| **Source code** | ~8,100 lines of TypeScript across ~15 files — small enough to audit in a weekend |
 | **Dependencies** | 0 runtime dependencies. Verify: `npm ls --production` |
 | **npm provenance** | Every release is [SLSA-attested](https://www.npmjs.com/package/@askalf/dario) via GitHub Actions with sigstore provenance attached to the transparency log |
 | **Security scanning** | [CodeQL](https://github.com/askalf/dario/actions/workflows/codeql.yml) runs on every push and weekly |
-| **Test footprint** | ~640 assertions across 20 files. Full `npm test` green on every release |
+| **Test footprint** | ~840 assertions across 24 files. Full `npm test` green on every release |
 | **Credential handling** | Tokens and API keys never logged, redacted from errors, stored with `0600` permissions |
 | **OAuth flow** | PKCE (Proof Key for Code Exchange), no client secret |
 | **Network scope** | Binds to `127.0.0.1` by default. `--host` allows LAN/mesh with `DARIO_API_KEY` gating. Upstream traffic goes only to the configured backend target URLs over HTTPS |
@@ -568,7 +568,7 @@ Yes — anything that speaks the OpenAI Chat Completions API. Groq, OpenRouter, 
 Dario auto-detects OAuth config from the installed Claude Code binary. When CC ships a new version with rotated values, dario picks them up on the next run. Cache at `~/.dario/cc-oauth-cache-v4.json`, keyed by the CC binary fingerprint.
 
 **What happens when Anthropic changes the CC request template?**
-Dario extracts the live request template from your installed Claude Code binary on startup — the system prompt, tool schemas, user-agent, beta flags, and header insertion order — and uses those to replay requests instead of a version pinned into dario itself. When CC ships a new version with a tweaked template, the next `dario proxy` run picks it up automatically. Drift detection (v3.17) forces a refresh when the installed CC version changes under dario.
+Dario extracts the live request template from your installed Claude Code binary on startup — the system prompt, tool schemas, user-agent, beta flags, header insertion order, static header values, and top-level request-body key order — and uses those to replay requests instead of a version pinned into dario itself. When CC ships a new version with a tweaked template, the next `dario proxy` run picks it up automatically. Drift detection (v3.17) forces a refresh when the installed CC version changes under dario, and the nightly `cc-drift-watch` workflow catches upstream rotations (client_id, URLs, tool set, version) the day they ship on npm.
 
 **First time setup on a fresh Claude account.**
 If dario is the first thing you run against a brand-new Claude account, prime the account with a few real Claude Code commands first:
@@ -617,15 +617,16 @@ Longer-form writing on how dario works and why it works that way:
 
 ## Contributing
 
-PRs welcome. The codebase is small TypeScript — ~7,600 lines across ~15 files:
+PRs welcome. The codebase is small TypeScript — ~8,100 lines across ~15 files:
 
 | File | Purpose |
 |---|---|
 | `src/proxy.ts` | HTTP proxy server, request handler, rate governor, Claude backend dispatch, OpenAI-compat routing, pool failover |
-| `src/cc-template.ts` | CC request template engine, universal `TOOL_MAP` (~65 schema-verified entries), orchestration and framework scrubbing, header-order replay |
-| `src/cc-template-data.json` | Bundled fallback CC request template (used when live-fingerprint extraction isn't possible) |
+| `src/cc-template.ts` | CC request template engine, universal `TOOL_MAP` (~66 schema-verified entries), orchestration and framework scrubbing, header-order + body-field-order replay |
+| `src/cc-template-data.json` | Bundled fallback CC request template (used when live-fingerprint extraction isn't possible). Scrubbed of host-identifying paths at bake time. |
+| `src/scrub-template.ts` | Host-context scrubber for the baked fallback template — strips per-session sections, replaces user-dir paths with a placeholder, drops `mcp__*` tools (v3.21) |
 | `src/cc-oauth-detect.ts` | OAuth config auto-detection from the installed CC binary |
-| `src/live-fingerprint.ts` | Live extraction of the CC request template (system prompt, tools, user-agent, beta flags, header order) from the installed Claude Code binary, drift detection, compat matrix, atomic cache writes, corruption recovery |
+| `src/live-fingerprint.ts` | Live extraction of the CC request template (system prompt, tools, user-agent, beta flags, header order, static header values, body field order) from the installed Claude Code binary, drift detection, compat matrix, atomic cache writes, corruption recovery |
 | `src/doctor.ts` | `dario doctor` health report aggregator — dario/Node/CC/template/drift/OAuth/pool/backends |
 | `src/oauth.ts` | Single-account token storage, PKCE flow, auto-refresh |
 | `src/accounts.ts` | Multi-account credential storage, independent OAuth lifecycle, refresh single-flight |
