@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.19.5] - 2026-04-17
+
+### Changed — `SUPPORTED_CC_RANGE.maxTested` bumped to `2.1.112` (dario#44)
+
+Nightly CC-drift watcher (shipped earlier today) flagged `@anthropic-ai/claude-code@2.1.112` as beyond dario's pinned `maxTested: '2.1.104'`, surfacing as a `[WARN] CC compat` line in `dario doctor` / `dario proxy` for users on current CC. tetsuco's v3.19.4 confirmation on dario#42 showed the same WARN against their real 2.1.112 install — the proxy still started and OAuth refreshed cleanly, so this is a soft-warn cleanup, not a fix for broken behavior.
+
+- **`src/live-fingerprint.ts` — `SUPPORTED_CC_RANGE.maxTested: '2.1.104' → '2.1.112'`.** 2.1.112 is the version tetsuco exercised end-to-end (login → proxy start → fingerprint refresh) on dario#42, so it's the right floor to call "tested" from. The `min: '1.0.0'` floor is unchanged. `checkCCCompat` now returns `ok` for CC v1.0.0 – v2.1.112; users on v2.1.113+ continue to get the `untested-above` soft warn until the next bump.
+- **Template re-capture deferred.** `cc-template-data.json` is still stamped `_version: "2.1.104"`, which the drift watcher flags as a low-severity `template.version` drift against 2.1.112. Deferring: the baked template is a seed — the runtime auto-refreshes from the user's own CC binary on first proxy run (see `refreshLiveFingerprintAsync` and tetsuco's `[dario] live fingerprint refreshed from CC 2.1.112` log), so a stale baked template only affects the very first request of a brand-new install before the background capture completes. The re-capture also needs a user-path scrubbing pass first (the current baked file contains capture-host paths). Tracked separately.
+
+### Why this release
+
+Mechanical drift-catch-up follow-up to dario#42 / dario#44. No behavior change for users who were already on 2.1.112 — just silences the spurious `[WARN]` noise and keeps `dario doctor` honest about what's actually been tested.
+
 ## [3.19.4] - 2026-04-17
 
 ### Fixed — `dario login` fails with "Invalid request format" on CC v2.1.107+ (dario#42)
