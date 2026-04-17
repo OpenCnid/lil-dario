@@ -230,7 +230,17 @@ async function proxy() {
   // generated even if nobody reads it), so it's opt-in.
   const drainOnClose = args.includes('--drain-on-close') || undefined;
 
-  await startProxy({ port, host, verbose, verboseBodies, model, passthrough, preserveTools, hybridTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, drainOnClose });
+  // --session-* knobs (v3.28, direction #1). Control the single-account
+  // session-id lifecycle: idle threshold, jitter on that threshold, hard
+  // max-age, and whether to give each upstream client its own session.
+  // All defaults preserve v3.27 behaviour exactly. Logic lives in
+  // src/session-rotation.ts; these flags just feed resolveSessionRotationConfig.
+  const sessionIdleRotateMs = parsePositiveIntFlag('--session-idle-rotate=');
+  const sessionRotateJitterMs = parsePositiveIntFlag('--session-rotate-jitter=');
+  const sessionMaxAgeMs = parsePositiveIntFlag('--session-max-age=');
+  const sessionPerClient = args.includes('--session-per-client') || undefined;
+
+  await startProxy({ port, host, verbose, verboseBodies, model, passthrough, preserveTools, hybridTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, drainOnClose, sessionIdleRotateMs, sessionRotateJitterMs, sessionMaxAgeMs, sessionPerClient });
 }
 
 function parsePositiveIntFlag(prefix: string): number | undefined {
@@ -535,6 +545,26 @@ async function help() {
                              is fully generated even if nobody reads
                              it) for fingerprint fidelity. Bounded by
                              the 5-minute upstream timeout. (v3.25)
+    --session-idle-rotate=MS Idle ms before the single-account session
+                             id rotates (default: 900000 = 15 min).
+                             Real CC rotates once per conversation, not
+                             per call; the default matches its observed
+                             cadence. Pool mode is unaffected. (v3.28)
+    --session-rotate-jitter=MS
+                             Max additional uniform-random jitter (ms)
+                             added to the idle threshold, sampled once
+                             per session at creation. Default: 0 (off).
+                             Hides the exact threshold from long-run
+                             rotation statistics. (v3.28)
+    --session-max-age=MS     Hard cap on a session id's lifetime
+                             regardless of activity. Default: off. Set
+                             for always-on pipelines where an idle
+                             window would never trigger. (v3.28)
+    --session-per-client     Give each upstream client (keyed by
+                             x-session-id / x-client-session-id
+                             header) its own rotated session id.
+                             Default: off (single session across all
+                             clients, v3.27 behaviour). (v3.28)
     --port=PORT              Port to listen on (default: 3456)
     --host=ADDRESS           Address to bind to (default: 127.0.0.1)
                              Use 0.0.0.0 for LAN; see README for DARIO_API_KEY

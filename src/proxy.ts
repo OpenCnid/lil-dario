@@ -100,11 +100,17 @@ function extractFirstUserMessage(body: Record<string, unknown>): string {
 //
 //   v3.19 keeps the id stable through a conversation window and rotates
 //   only after an idle gap long enough to credibly indicate a new
-//   conversation (SESSION_IDLE_ROTATE_MS). Pool mode still uses the
-//   per-account identity.sessionId (stable across the account's lifetime).
-let SESSION_ID = randomUUID();
-let SESSION_LAST_USED = 0;
-const SESSION_IDLE_ROTATE_MS = 15 * 60 * 1000;
+//   conversation. Pool mode still uses the per-account identity.sessionId
+//   (stable across the account's lifetime).
+//
+//   v3.28 generalises the single hardcoded 15-min window into a tunable
+//   registry (see src/session-rotation.ts) with optional jitter, max-age,
+//   and per-client keying. SESSION_ID below is kept only as a mirror of
+//   the default single-account session so out-of-band consumers (presence
+//   ping, diagnostic logs) can read the most recent id without going
+//   through the registry. It's refreshed after every dispatch-path call
+//   that assigns a new id.
+let SESSION_ID: string = randomUUID();
 const OS_NAME = platform === 'win32' ? 'Windows' : platform === 'darwin' ? 'MacOS' : 'Linux';
 
 // Claude Code device identity — required for Max plan billing classification.
@@ -343,6 +349,10 @@ interface ProxyOptions {
   pacingMinMs?: number;     // Minimum ms between requests (v3.24, direction #6 — default 500)
   pacingJitterMs?: number;  // Max uniform-random jitter added on top of pacingMinMs (v3.24 — default 0)
   drainOnClose?: boolean;   // Keep draining upstream after client disconnects (v3.25, direction #5 — default off)
+  sessionIdleRotateMs?: number;    // Idle ms before session-id rotates (v3.28, direction #1 — default 15min)
+  sessionRotateJitterMs?: number;  // Uniform jitter on idle threshold (v3.28 — default 0)
+  sessionMaxAgeMs?: number;        // Hard cap on session-id lifetime (v3.28 — default off)
+  sessionPerClient?: boolean;      // Key sessions by x-session-id/x-client-session-id header (v3.28 — default off)
 }
 
 export function sanitizeError(err: unknown): string {
@@ -621,6 +631,23 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const drainOnClose = resolveDrainOnClose(opts.drainOnClose);
   if (verbose) {
     console.log(`[dario] drain-on-close: ${drainOnClose ? 'enabled' : 'disabled'}`);
+  }
+
+  // Session-ID lifecycle (v3.28, direction #1). Replaces the v3.27 hardcoded
+  // 15-minute idle window with a tunable registry: idle threshold, jitter on
+  // that threshold, optional hard max-age, and optional per-client keying.
+  // Defaults preserve v3.27 behavior exactly. See src/session-rotation.ts.
+  const { SessionRegistry, resolveSessionRotationConfig } = await import('./session-rotation.js');
+  const sessionCfg = resolveSessionRotationConfig({
+    idleRotateMs: opts.sessionIdleRotateMs,
+    jitterMs: opts.sessionRotateJitterMs,
+    maxAgeMs: opts.sessionMaxAgeMs,
+    perClient: opts.sessionPerClient,
+  });
+  const sessionRegistry = new SessionRegistry(sessionCfg, () => randomUUID());
+  if (verbose) {
+    const maxAge = sessionCfg.maxAgeMs !== undefined ? `${sessionCfg.maxAgeMs}ms` : 'off';
+    console.log(`[dario] session: idle=${sessionCfg.idleRotateMs}ms jitter=${sessionCfg.jitterMs}ms maxAge=${maxAge} perClient=${sessionCfg.perClient}`);
   }
 
   // Optional proxy authentication — pre-encode key buffer for performance
@@ -986,6 +1013,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // selection toward one we already paid cache cost on — passthrough
       // users aren't doing template replay anyway).
       let stickyKey: string | null = null;
+      // Outbound session id resolved once — either inside the template build
+      // (so body metadata matches) or below for passthrough (no body build).
+      let preBodySessionId: string | undefined;
       // Request context for hybrid-mode field injection (#33). Built once
       // per request from incoming headers so the reverse mapper can fill
       // client-declared fields like `sessionId` that CC's schema doesn't
@@ -1041,9 +1071,27 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               }
             }
 
+            // Resolve the outbound session id before the body build so the
+            // metadata.session_id in the CC body and the x-claude-code-session-id
+            // header both use the same value. v3.27 consulted SESSION_ID twice
+            // with rotation between the reads, so on rotation events body and
+            // header disagreed — harmless for plain operation but a fingerprint
+            // in its own right.
+            if (poolAccount) {
+              preBodySessionId = poolAccount.identity.sessionId;
+            } else {
+              const clientKey = (req.headers['x-session-id'] as string | undefined)
+                ?? (req.headers['x-client-session-id'] as string | undefined);
+              const assigned = sessionRegistry.getOrCreate(clientKey, Date.now());
+              preBodySessionId = assigned.sessionId;
+              SESSION_ID = assigned.sessionId;
+              if (verbose && assigned.rotated && assigned.reason !== 'rotate-new') {
+                console.log(`[dario] #${requestCount} session: rotate (${assigned.reason})`);
+              }
+            }
             const bodyIdentity = poolAccount
               ? poolAccount.identity
-              : { deviceId: identity.deviceId, accountUuid: identity.accountUuid, sessionId: SESSION_ID };
+              : { deviceId: identity.deviceId, accountUuid: identity.accountUuid, sessionId: preBodySessionId };
             const { body: ccBody, toolMap, detectedClient } = buildCCRequest(
               r, billingTag, CACHE_1H,
               bodyIdentity,
@@ -1142,18 +1190,28 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       lastRequestTime = Date.now();
 
       // Session ID: pool mode uses the per-account identity.sessionId (stable
-      // per account). Single-account mode keeps SESSION_ID stable through
-      // active conversations and rotates only after an idle gap that looks
-      // like a new conversation — matches CC's observed cadence (see note
-      // at SESSION_ID declaration).
-      if (!poolAccount) {
-        const nowTs = Date.now();
-        if (SESSION_LAST_USED === 0 || nowTs - SESSION_LAST_USED > SESSION_IDLE_ROTATE_MS) {
-          SESSION_ID = randomUUID();
+      // per account). Single-account mode delegates to the session registry
+      // (src/session-rotation.ts) which applies the configured idle / jitter /
+      // max-age / per-client policy. Resolution happens earlier, at body-build
+      // time, so the CC body's metadata.session_id and the outbound
+      // x-claude-code-session-id header always agree. preBodySessionId holds
+      // the template-build value; in passthrough mode (no template build)
+      // the registry is consulted here instead.
+      let outboundSessionId: string;
+      if (poolAccount) {
+        outboundSessionId = poolAccount.identity.sessionId;
+      } else if (preBodySessionId !== undefined) {
+        outboundSessionId = preBodySessionId;
+      } else {
+        const clientKey = (req.headers['x-session-id'] as string | undefined)
+          ?? (req.headers['x-client-session-id'] as string | undefined);
+        const assigned = sessionRegistry.getOrCreate(clientKey, Date.now());
+        outboundSessionId = assigned.sessionId;
+        SESSION_ID = assigned.sessionId;
+        if (verbose && assigned.rotated && assigned.reason !== 'rotate-new') {
+          console.log(`[dario] #${requestCount} session: rotate (${assigned.reason})`);
         }
-        SESSION_LAST_USED = nowTs;
       }
-      const outboundSessionId = poolAccount ? poolAccount.identity.sessionId : SESSION_ID;
 
       const headers: Record<string, string> = {
         ...staticHeaders,
