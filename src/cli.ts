@@ -483,6 +483,14 @@ async function help() {
                              operations to a named sub-agent (v3.26)
     dario subagent remove    Remove the registered sub-agent file
     dario subagent status    Show whether the sub-agent is installed
+    dario mcp                Run dario as an MCP (Model Context Protocol)
+                             server on stdio. Exposes read-only tools
+                             (doctor, status, accounts_list, backends_list,
+                             subagent_status, fingerprint_info) so MCP
+                             clients (Claude Desktop, IDEs, etc.) can
+                             inspect dario's state. No destructive ops
+                             are exposed — mutations still require the
+                             CLI. (v3.27)
     dario doctor             Print a health report: dario / Node / CC /
                              template / drift / OAuth / pool / backends
 
@@ -671,6 +679,43 @@ async function subagent() {
   process.exit(1);
 }
 
+async function mcp() {
+  // MCP-over-stdio: protocol frames on stdout ONLY. Any stray console.log
+  // from downstream modules (doctor / oauth / accounts helpers) would
+  // corrupt the frame stream, so redirect them to stderr defensively for
+  // the lifetime of the server. Restored in the finally block for tests /
+  // embedders that re-use the process after `dario mcp`.
+  const origLog = console.log;
+  const origInfo = console.info;
+  console.log = (...a: unknown[]) => console.error(...a);
+  console.info = (...a: unknown[]) => console.error(...a);
+  try {
+    const [{ buildDefaultToolRegistry }, { runMcpServer }] = await Promise.all([
+      import('./mcp/tools.js'),
+      import('./mcp/server.js'),
+    ]);
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const here = join(fileURLToPath(import.meta.url), '..', '..');
+    let pkgVersion = 'unknown';
+    try {
+      const pkg = JSON.parse(await readFile(join(here, 'package.json'), 'utf-8'));
+      if (typeof pkg.version === 'string') pkgVersion = pkg.version;
+    } catch {
+      // package.json missing or malformed — fall back to 'unknown' but let
+      // the server keep running so tool responses are still usable.
+    }
+    const tools = await buildDefaultToolRegistry();
+    await runMcpServer({
+      tools,
+      server: { name: 'dario', version: pkgVersion },
+    });
+  } finally {
+    console.log = origLog;
+    console.info = origInfo;
+  }
+}
+
 async function doctor() {
   const { runChecks, formatChecks, exitCodeFor } = await import('./doctor.js');
   console.log('');
@@ -711,6 +756,7 @@ const commands: Record<string, () => Promise<void>> = {
   backend,
   shim,
   subagent,
+  mcp,
   doctor,
   help,
   version,
