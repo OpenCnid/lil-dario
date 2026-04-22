@@ -17,7 +17,7 @@ npm install -g @askalf/dario && dario proxy
 
 One command, one local URL, every provider behind it. Point `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, or anything that speaks either protocol at `http://localhost:3456` and the **model name** decides where the request goes:
 
-- `claude-opus-4-7`, `claude-sonnet-4-6`, `opus`, `sonnet`, `haiku` → **Anthropic** (via your Claude Max/Pro subscription, or a direct API key, your choice)
+- `claude-opus-4-6`, `claude-sonnet-4-6`, `opus`, `sonnet`, `haiku` → **Anthropic** (via your Claude Max/Pro subscription, or a direct API key, your choice)
 - `gpt-4o`, `o3-mini`, `chatgpt-4o-latest` → **OpenAI**
 - `llama-3.3-70b`, `deepseek-v3`, anything else → **Groq**, **OpenRouter**, **local LiteLLM**, **vLLM**, **Ollama**, whichever OpenAI-compat backend you wired up
 - Force a backend explicitly with a prefix: `openai:gpt-4o`, `groq:llama-3.3-70b`, `local:qwen-coder`, `claude:opus`
@@ -361,7 +361,7 @@ A version marker (`<!-- dario-sub-agent-version: X -->`) embedded in the markdow
 | `--preserve-tools` / `--keep-tools` | Keep client tool schemas instead of remapping to CC's. Required for clients whose tools have fields CC doesn't — see [Custom tool schemas](#custom-tool-schemas). Auto-enabled for Cline / Kilo Code / Roo Code and forks (detected via system-prompt fingerprint). | off (auto for text-tool clients) |
 | `--no-auto-detect` / `--no-auto-preserve` | Disable the text-tool-client detector so the CC fingerprint stays intact on Cline/Kilo/Roo prompts (v3.20.1, dario#40). Explicit `--preserve-tools` still wins. | off |
 | `--hybrid-tools` / `--context-inject` | Remap to CC tools **and** inject request-context values (`sessionId`, `requestId`, `channelId`, `userId`, `timestamp`) into client-declared fields CC's schema doesn't carry. See [Hybrid tool mode](#hybrid-tool-mode). | off |
-| `--model=<name>` | Force a model. Shortcuts (`opus`, `sonnet`, `haiku`), full IDs (`claude-opus-4-7`), or a **provider prefix** (`openai:gpt-4o`, `groq:llama-3.3-70b`, `claude:opus`, `local:qwen-coder`) to force the backend server-wide. | passthrough |
+| `--model=<name>` | Force a model. Shortcuts (`opus`, `sonnet`, `haiku`), full IDs (`claude-opus-4-6`), or a **provider prefix** (`openai:gpt-4o`, `groq:llama-3.3-70b`, `claude:opus`, `local:qwen-coder`) to force the backend server-wide. | passthrough |
 | `--port=<n>` | Port to listen on | `3456` |
 | `--host=<addr>` / `DARIO_HOST` | Bind address. Use `0.0.0.0` for LAN, or a specific IP (e.g. a Tailscale interface). When non-loopback, also set `DARIO_API_KEY`. | `127.0.0.1` |
 | `--verbose` / `-v` | Log every request (one line per request — method + path + billing bucket) | off |
@@ -402,7 +402,7 @@ client = anthropic.Anthropic(
 )
 
 msg = client.messages.create(
-    model="claude-opus-4-7",
+    model="claude-opus-4-6",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}],
 )
@@ -425,9 +425,9 @@ msg = client.chat.completions.create(
     messages=[{"role": "user", "content": "Hello!"}],
 )
 
-# claude-opus-4-7 routes to the Claude subscription backend — same SDK, same URL
+# claude-opus-4-6 routes to the Claude subscription backend — same SDK, same URL
 claude_msg = client.chat.completions.create(
-    model="claude-opus-4-7",
+    model="claude-opus-4-6",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 ```
@@ -443,7 +443,7 @@ const client = new Anthropic({
 });
 
 const msg = await client.messages.create({
-  model: "claude-opus-4-7",
+  model: "claude-opus-4-6",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Hello!" }],
 });
@@ -456,7 +456,7 @@ export OPENAI_BASE_URL=http://localhost:3456/v1
 export OPENAI_API_KEY=dario
 ```
 
-Any tool that accepts an OpenAI base URL works. Use Claude model names (`claude-opus-4-7`, `opus`, `sonnet`, `haiku`) for the Claude backend, or GPT-family names for the configured OpenAI-compat backend.
+Any tool that accepts an OpenAI base URL works. Use Claude model names (`claude-opus-4-6`, `opus`, `sonnet`, `haiku`) for the Claude backend, or GPT-family names for the configured OpenAI-compat backend.
 
 ### curl
 
@@ -465,7 +465,7 @@ Any tool that accepts an OpenAI base URL works. Use Claude model names (`claude-
 curl http://localhost:3456/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
-  -d '{"model":"claude-opus-4-7","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"claude-opus-4-6","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}'
 
 # OpenAI backend via OpenAI format
 curl http://localhost:3456/v1/chat/completions \

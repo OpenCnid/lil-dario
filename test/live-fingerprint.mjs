@@ -62,7 +62,7 @@ header('extractTemplate — pulls agent identity, system prompt, tools, version'
       'anthropic-beta': 'claude-code-20250219,interleaved-thinking-2025-05-14',
     },
     body: {
-      model: 'claude-opus-4-5',
+      model: 'claude-opus-4-6',
       max_tokens: 32000,
       system: [
         { type: 'text', text: 'billing tag payload' },

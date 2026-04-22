@@ -75,7 +75,7 @@ header('1. byte-by-byte chunking produces identical output to whole-input');
 {
   const sse = [
     `event: message_start`,
-    `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}`,
+    `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}`,
     ``,
     `event: content_block_start`,
     `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}`,
@@ -271,7 +271,7 @@ header('8. tool_use partial accumulation caps at 2MB and falls back to passthrou
   const big2 = 'y'.repeat(700_000);
   const sse = [
     `event: message_start`,
-    `data: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude-opus-4-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
+    `data: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude-opus-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
     ``,
     `event: content_block_start`,
     `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t_1","name":"Bash","input":{}}}`,
