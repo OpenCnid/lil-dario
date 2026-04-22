@@ -182,6 +182,104 @@ const FRAMEWORK_PATTERNS: RegExp[] = [
   /\bsessions_[a-z_]+\b/gi,
 ];
 
+const OPENCLAW_SUBSET_TEXT_REPLACEMENTS: Array<{ pattern: RegExp; replacement: string }> = [
+  { pattern: /\bOpenClaw\b/g, replacement: 'OCPlatform' },
+  { pattern: /\bopenclaw\b/g, replacement: 'ocplatform' },
+  { pattern: /\bsessions_spawn\b/g, replacement: 'create_task' },
+  { pattern: /\bsessions_list\b/g, replacement: 'list_tasks' },
+  { pattern: /\bsessions_history\b/g, replacement: 'get_history' },
+  { pattern: /\bsessions_send\b/g, replacement: 'send_to_task' },
+  { pattern: /\bsessions_yield_interrupt\b/g, replacement: 'task_yield_interrupt' },
+  { pattern: /\bsessions_yield\b/g, replacement: 'yield_task' },
+  { pattern: /\bsessions_store\b/g, replacement: 'task_store' },
+  { pattern: /\bHEARTBEAT_OK\b/g, replacement: 'HB_ACK' },
+  { pattern: /\bHEARTBEAT\b/g, replacement: 'HB_SIGNAL' },
+  { pattern: /\bheartbeat\b/g, replacement: 'hb_signal' },
+  { pattern: /\brunning inside\b/g, replacement: 'operating from' },
+  { pattern: /\bPrometheus\b/g, replacement: 'PAssistant' },
+  { pattern: /\bprometheus\b/g, replacement: 'passistant' },
+  { pattern: /clawhub\.com/g, replacement: 'skillhub.example.com' },
+  { pattern: /\bclawhub\b/g, replacement: 'skillhub' },
+  { pattern: /\bclawd\b/g, replacement: 'agentd' },
+  { pattern: /\blossless-claw\b/g, replacement: 'lossless-ctx' },
+  { pattern: /\bthird-party\b/g, replacement: 'external' },
+  { pattern: /\bbilling proxy\b/g, replacement: 'routing layer' },
+  { pattern: /\bbilling-proxy\b/g, replacement: 'routing-layer' },
+  { pattern: /x-anthropic-billing-header/g, replacement: 'x-routing-config' },
+  { pattern: /x-anthropic-billing/g, replacement: 'x-routing-cfg' },
+  { pattern: /cch=00000/g, replacement: 'cfg=00000' },
+  { pattern: /\bcc_version\b/g, replacement: 'rt_version' },
+  { pattern: /\bcc_entrypoint\b/g, replacement: 'rt_entrypoint' },
+  { pattern: /\bbilling header\b/g, replacement: 'routing config' },
+  { pattern: /\bextra usage\b/g, replacement: 'usage quota' },
+  { pattern: /\bassistant platform\b/g, replacement: 'ocplatform' },
+];
+
+function applyTextReplacements(
+  segment: string,
+  replacements?: Array<{ pattern: RegExp; replacement: string }>,
+): string {
+  if (!replacements || replacements.length === 0) return segment;
+  let result = segment;
+  for (const { pattern, replacement } of replacements) {
+    pattern.lastIndex = 0;
+    result = result.replace(pattern, (match, ...args) => {
+      const offset = args[args.length - 2] as number;
+      const src = args[args.length - 1] as string;
+      const before = offset > 0 ? src[offset - 1] : '';
+      const after = offset + match.length < src.length ? src[offset + match.length] : '';
+      if (before === '.' || before === '/' || before === '\\' || before === '-' || before === '_') return match;
+      if (after === '/' || after === '\\') return match;
+      return replacement;
+    });
+  }
+  return result;
+}
+
+function findWorkspaceDocBoundary(text: string, searchFrom = 0): number {
+  const boundaryMatchers = [/\n## \/home\//, /\n## \/Users\//, /\n## [A-Z]:\\\\/];
+  let boundaryIdx = -1;
+  const slice = text.slice(searchFrom);
+  for (const matcher of boundaryMatchers) {
+    const match = matcher.exec(slice);
+    if (!match || match.index === undefined) continue;
+    const absoluteIdx = searchFrom + match.index;
+    if (boundaryIdx === -1 || absoluteIdx < boundaryIdx) {
+      boundaryIdx = absoluteIdx;
+    }
+  }
+  return boundaryIdx;
+}
+
+function applyProfileTextReplacements(
+  segment: string,
+  preserveToolsProfile?: PreserveToolsProfileId,
+): string {
+  return applyTextReplacements(segment, getPreserveProfileTextReplacements(preserveToolsProfile));
+}
+
+export function sanitizeOpenClawProfileText(
+  text: string,
+  preserveToolsProfile?: PreserveToolsProfileId,
+  opts: { preserveWorkspaceDocs?: boolean } = {},
+): string {
+  const preserveWorkspaceDocs = opts.preserveWorkspaceDocs && preserveToolsProfile === 'openclaw-subset';
+  if (!text || !preserveToolsProfile) {
+    return text;
+  }
+
+  if (!preserveWorkspaceDocs) {
+    return applyProfileTextReplacements(text, preserveToolsProfile);
+  }
+
+  const boundaryIdx = findWorkspaceDocBoundary(text);
+  if (boundaryIdx === -1) {
+    return applyProfileTextReplacements(text, preserveToolsProfile);
+  }
+
+  return applyProfileTextReplacements(text.slice(0, boundaryIdx), preserveToolsProfile) + text.slice(boundaryIdx);
+}
+
 export function scrubFrameworkIdentifiers(text: string): string {
   let result = text;
   for (const pattern of FRAMEWORK_PATTERNS) {
@@ -203,6 +301,43 @@ export function scrubFrameworkIdentifiers(text: string): string {
     });
   }
   return result;
+}
+
+export function compactOpenClawSystemPrompt(
+  systemText: string,
+  preserveToolsProfile?: PreserveToolsProfileId,
+): string {
+  if (!systemText || preserveToolsProfile !== 'openclaw-subset') {
+    return systemText;
+  }
+
+  const identityIdx = systemText.indexOf('You are a personal assistant');
+  if (identityIdx === -1) {
+    return systemText;
+  }
+
+  const boundaryIdx = findWorkspaceDocBoundary(systemText, identityIdx + 1);
+
+  if (boundaryIdx === -1) {
+    return systemText;
+  }
+
+  let stripFrom = identityIdx;
+  if (stripFrom > 0 && systemText[stripFrom - 1] === '\n') {
+    stripFrom -= 1;
+  }
+
+  if (boundaryIdx - stripFrom < 1000) {
+    return systemText;
+  }
+
+  return [
+    systemText.slice(0, stripFrom).trimEnd(),
+    OPENCLAW_COMPACT_SYSTEM_PARAPHRASE,
+    systemText.slice(boundaryIdx).trimStart(),
+  ]
+    .filter((part) => part.length > 0)
+    .join('\n\n');
 }
 
 /**
@@ -302,6 +437,27 @@ export interface ToolMapping {
    * should win the Bash reverse slot when both are declared — dario#37).
    */
   reverseScore?: number;
+}
+
+export type PreserveToolsProfileId = 'openclaw-subset' | 'openclaw-wide-alias';
+
+const OPENCLAW_COMPACT_SYSTEM_PARAPHRASE = [
+  'You are an AI operations assistant with access to the tools listed in this request for file work, command execution, web lookup, browser control, scheduling, messaging, and session management.',
+  'Tool names are case-sensitive and must be called exactly as listed.',
+  'Replies route to the active channel automatically. Use the task and session tools for cross-session work.',
+  'Follow matching workspace skills and local reference docs when they materially apply.',
+].join(' ');
+
+interface PreserveAliasRule {
+  alias: string;
+  description?: string;
+  fieldAliases?: Record<string, string>;
+}
+
+interface PreserveAliasProfileConfig {
+  aliasRules: Record<string, PreserveAliasRule>;
+  propertyRenames?: Record<string, string>;
+  dropUnmatchedTools: boolean;
 }
 
 /**
@@ -775,6 +931,303 @@ const TOOL_MAP: Record<string, ToolMapping> = {
   exit_worktree: { ccTool: 'ExitWorktree' },
 };
 
+const OPENCLAW_SUBSET_ALIAS_RULES: Record<string, PreserveAliasRule> = {
+  session_status: {
+    alias: 'StatusCheck',
+    description: 'Show session status and active model details.',
+    fieldAliases: { sessionKey: 'threadKey' },
+  },
+  sessions_list: {
+    alias: 'TaskList',
+    description: 'List visible sessions and recent activity.',
+  },
+  sessions_send: {
+    alias: 'TaskSend',
+    description: 'Send a message into another visible session.',
+    fieldAliases: { sessionKey: 'threadKey', agentId: 'workerId' },
+  },
+  sessions_spawn: {
+    alias: 'TaskCreate',
+    description: 'Spawn a fresh isolated session or sub-agent run.',
+    fieldAliases: { agentId: 'workerId', resumeSessionId: 'resumeRunId' },
+  },
+  memory_search: {
+    alias: 'KnowledgeSearch',
+    description: 'Search stored memories and prior facts.',
+    fieldAliases: { userId: 'actorId' },
+  },
+  memory_get: {
+    alias: 'KnowledgeRead',
+    description: 'Read one stored memory record by id.',
+    fieldAliases: { memoryId: 'recordId' },
+  },
+  memory_store: {
+    alias: 'KnowledgeStore',
+    description: 'Store a durable memory record.',
+    fieldAliases: { userId: 'actorId' },
+  },
+  cron: {
+    alias: 'Scheduler',
+    description: 'Manage reminders and scheduled runs.',
+    fieldAliases: { jobId: 'scheduleId', gatewayUrl: 'relayUrl', gatewayToken: 'relayToken' },
+  },
+  gateway: {
+    alias: 'SystemCtl',
+    description: 'Inspect, patch, restart, or update the gateway.',
+    fieldAliases: { gatewayUrl: 'relayUrl', gatewayToken: 'relayToken', sessionKey: 'threadKey' },
+  },
+};
+
+const OPENCLAW_WIDE_ALIAS_RULES: Record<string, PreserveAliasRule> = {
+  read: { alias: 'Read' },
+  edit: { alias: 'Edit' },
+  write: { alias: 'Write' },
+  exec: { alias: 'Bash' },
+  process: { alias: 'ProcessCtl' },
+  canvas: { alias: 'Canvas' },
+  message: { alias: 'SendMessage' },
+  agents_list: { alias: 'AgentList' },
+  sessions_list: { alias: 'TaskList' },
+  sessions_history: { alias: 'TaskHistory' },
+  sessions_send: { alias: 'TaskSend' },
+  sessions_yield: { alias: 'TaskYield' },
+  sessions_spawn: { alias: 'TaskCreate' },
+  subagents: { alias: 'SubagentCtl' },
+  session_status: { alias: 'StatusCheck' },
+  web_search: { alias: 'WebSearch' },
+  web_fetch: { alias: 'WebFetch' },
+  image: { alias: 'ImageAnalyze' },
+  browser: { alias: 'BrowserControl' },
+  memory_search: { alias: 'KnowledgeSearch' },
+  memory_store: { alias: 'KnowledgeStore' },
+  memory_get: { alias: 'KnowledgeRead' },
+  memory_list: { alias: 'KnowledgeList' },
+  memory_forget: { alias: 'KnowledgeForget' },
+};
+
+const OPENCLAW_SUBSET_PROPERTY_RENAMES: Record<string, string> = {
+  session_id: 'thread_id',
+  conversation_id: 'thread_ref',
+  summaryIds: 'chunk_ids',
+  summary_id: 'chunk_id',
+  system_event: 'event_text',
+  agent_id: 'worker_id',
+  wake_at: 'trigger_at',
+  wake_event: 'trigger_event',
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildAliasTextReplacements(
+  rules: Record<string, PreserveAliasRule>,
+  opts: { skipBareNames?: Set<string> } = {},
+): Array<{ pattern: RegExp; replacement: string }> {
+  return Object.entries(rules)
+    .sort((a, b) => b[0].length - a[0].length)
+    .flatMap(([name, rule]) => {
+      const replacements: Array<{ pattern: RegExp; replacement: string }> = [];
+      if (!opts.skipBareNames?.has(name)) {
+        replacements.push({
+          pattern: new RegExp(`\\b${escapeRegExp(name)}\\b`, 'g'),
+          replacement: rule.alias,
+        });
+      }
+      replacements.push(
+        { pattern: new RegExp('`' + escapeRegExp(name) + '`', 'g'), replacement: `\`${rule.alias}\`` },
+        { pattern: new RegExp('"' + escapeRegExp(name) + '"', 'g'), replacement: `"${rule.alias}"` },
+        { pattern: new RegExp("'" + escapeRegExp(name) + "'", 'g'), replacement: `'${rule.alias}'` },
+      );
+      return replacements;
+    });
+}
+
+// In free text, bare English words like "message" or "read" are often just
+// prose, not tool identifiers. The wide-alias profile still rewrites explicit
+// code-ish mentions (`message`, "message", 'message') and all of the more
+// distinctive OpenClaw identifiers (sessions_send, memory_search, ...), but it
+// leaves these ordinary bare words alone so we don't turn "message body" into
+// "SendMessage body" in user/history text.
+const WIDE_ALIAS_SKIP_BARE_NAMES = new Set([
+  'read',
+  'edit',
+  'write',
+  'exec',
+  'process',
+  'canvas',
+  'message',
+  'image',
+  'browser',
+]);
+
+const OPENCLAW_WIDE_ALIAS_TEXT_REPLACEMENTS = buildAliasTextReplacements(OPENCLAW_WIDE_ALIAS_RULES, {
+  skipBareNames: WIDE_ALIAS_SKIP_BARE_NAMES,
+});
+
+function sanitizeSchemaTextDeep(
+  schema: unknown,
+  preserveToolsProfile?: PreserveToolsProfileId,
+): unknown {
+  if (Array.isArray(schema)) return schema.map((entry) => sanitizeSchemaTextDeep(entry, preserveToolsProfile));
+  if (!isRecord(schema)) return schema;
+
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (
+      typeof value === 'string'
+      && ['description', 'title', 'markdownDescription'].includes(key)
+    ) {
+      sanitized[key] = applyProfileTextReplacements(value, preserveToolsProfile);
+      continue;
+    }
+    sanitized[key] = sanitizeSchemaTextDeep(value, preserveToolsProfile);
+  }
+  return sanitized;
+}
+
+const PRESERVE_ALIAS_PROFILE_CONFIGS: Record<PreserveToolsProfileId, PreserveAliasProfileConfig> = {
+  'openclaw-subset': {
+    aliasRules: OPENCLAW_SUBSET_ALIAS_RULES,
+    propertyRenames: OPENCLAW_SUBSET_PROPERTY_RENAMES,
+    dropUnmatchedTools: true,
+  },
+  'openclaw-wide-alias': {
+    aliasRules: OPENCLAW_WIDE_ALIAS_RULES,
+    dropUnmatchedTools: false,
+  },
+};
+
+function getPreserveAliasProfileConfig(
+  preserveToolsProfile?: PreserveToolsProfileId,
+): PreserveAliasProfileConfig | undefined {
+  return preserveToolsProfile ? PRESERVE_ALIAS_PROFILE_CONFIGS[preserveToolsProfile] : undefined;
+}
+
+function getPreserveProfileTextReplacements(
+  preserveToolsProfile?: PreserveToolsProfileId,
+): Array<{ pattern: RegExp; replacement: string }> | undefined {
+  if (preserveToolsProfile === 'openclaw-subset') return OPENCLAW_SUBSET_TEXT_REPLACEMENTS;
+  if (preserveToolsProfile === 'openclaw-wide-alias') return OPENCLAW_WIDE_ALIAS_TEXT_REPLACEMENTS;
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function invertFieldAliases(fieldAliases?: Record<string, string>): Record<string, string> | undefined {
+  if (!fieldAliases) return undefined;
+  const reversed: Record<string, string> = {};
+  for (const [from, to] of Object.entries(fieldAliases)) reversed[to] = from;
+  return reversed;
+}
+
+function mergeFieldAliases(...aliasSets: Array<Record<string, string> | undefined>): Record<string, string> | undefined {
+  const merged = Object.assign({}, ...aliasSets.filter((aliases) => aliases && Object.keys(aliases).length > 0));
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+function renameKeysDeep(value: unknown, fieldAliases?: Record<string, string>): unknown {
+  if (!fieldAliases || Object.keys(fieldAliases).length === 0) return value;
+  if (Array.isArray(value)) return value.map((entry) => renameKeysDeep(entry, fieldAliases));
+  if (!isRecord(value)) return value;
+
+  const renamed: Record<string, unknown> = {};
+  for (const [key, inner] of Object.entries(value)) {
+    renamed[fieldAliases[key] ?? key] = renameKeysDeep(inner, fieldAliases);
+  }
+  return renamed;
+}
+
+function renameSchemaDeep(schema: unknown, fieldAliases?: Record<string, string>): unknown {
+  if (!isRecord(schema) || !fieldAliases || Object.keys(fieldAliases).length === 0) {
+    return schema;
+  }
+
+  const renamed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === 'properties' && isRecord(value)) {
+      const properties: Record<string, unknown> = {};
+      for (const [propName, propSchema] of Object.entries(value)) {
+        properties[fieldAliases[propName] ?? propName] = renameSchemaDeep(propSchema, fieldAliases);
+      }
+      renamed.properties = properties;
+      continue;
+    }
+    if (key === 'required' && Array.isArray(value)) {
+      renamed.required = value.map((entry) =>
+        typeof entry === 'string' ? (fieldAliases[entry] ?? entry) : entry,
+      );
+      continue;
+    }
+    renamed[key] = Array.isArray(value)
+      ? value.map((entry) => renameSchemaDeep(entry, fieldAliases))
+      : renameSchemaDeep(value, fieldAliases);
+  }
+  return renamed;
+}
+
+function resolvePreserveToolsAliasProfile(params: {
+  clientTools: Array<Record<string, unknown>>;
+  preserveToolsProfile?: PreserveToolsProfileId;
+}): {
+  tools: Array<Record<string, unknown>>;
+  toolMap: Map<string, ToolMapping>;
+} {
+  const profile = getPreserveAliasProfileConfig(params.preserveToolsProfile);
+  if (!profile) {
+    return { tools: params.clientTools, toolMap: new Map<string, ToolMapping>() };
+  }
+
+  const claimedNames = new Set(
+    params.clientTools
+      .map((tool) => (typeof tool.name === 'string' ? tool.name : ''))
+      .filter((name) => name.length > 0),
+  );
+  const activeToolMap = new Map<string, ToolMapping>();
+  const aliasedTools: Array<Record<string, unknown>> = [];
+  for (const tool of params.clientTools) {
+    const originalName = typeof tool.name === 'string' ? tool.name : '';
+    const rule = profile.aliasRules[originalName];
+    if (!rule) {
+      if (!profile.dropUnmatchedTools) aliasedTools.push(tool);
+      continue;
+    }
+    if (claimedNames.has(rule.alias) && rule.alias !== originalName) {
+      if (!profile.dropUnmatchedTools) aliasedTools.push(tool);
+      continue;
+    }
+
+    const forwardFieldAliases = mergeFieldAliases(profile.propertyRenames, rule.fieldAliases);
+    const reverseFieldAliases = invertFieldAliases(forwardFieldAliases);
+    const descriptionText = rule.description ?? tool.description;
+    activeToolMap.set(originalName, {
+      ccTool: rule.alias,
+      translateArgs: forwardFieldAliases
+        ? (args) => renameKeysDeep(args, forwardFieldAliases) as Record<string, unknown>
+        : undefined,
+      translateBack: reverseFieldAliases
+        ? (args) => renameKeysDeep(args, reverseFieldAliases) as Record<string, unknown>
+        : undefined,
+    });
+
+    aliasedTools.push({
+      ...tool,
+      name: rule.alias,
+      description: typeof descriptionText === 'string'
+        ? applyProfileTextReplacements(descriptionText, params.preserveToolsProfile)
+        : descriptionText,
+      input_schema: sanitizeSchemaTextDeep(
+        renameSchemaDeep(tool.input_schema, forwardFieldAliases),
+        params.preserveToolsProfile,
+      ),
+    });
+  }
+
+  return { tools: aliasedTools, toolMap: activeToolMap };
+}
+
 /**
  * Build a CC-template request from a client request.
  * Replaces the entire request structure — tools, fields, ordering — with
@@ -785,7 +1238,12 @@ export function buildCCRequest(
   billingTag: string,
   cacheControl: { type: 'ephemeral' },
   identity: { deviceId: string; accountUuid: string; sessionId: string },
-  opts: { preserveTools?: boolean; hybridTools?: boolean; noAutoDetect?: boolean } = {},
+  opts: {
+    preserveTools?: boolean;
+    preserveToolsProfile?: PreserveToolsProfileId;
+    hybridTools?: boolean;
+    noAutoDetect?: boolean;
+  } = {},
 ): { body: Record<string, unknown>; toolMap: Map<string, ToolMapping>; unmappedTools: string[]; detectedClient?: string } {
 
   const model = clientBody.model as string || 'claude-sonnet-4-6';
@@ -854,8 +1312,18 @@ export function buildCCRequest(
   // lossy forward-only translation can't provide. Users with custom tool
   // schemas should use preserveTools to keep their tools as-is and accept
   // the fingerprint risk on their own account.
-  const activeToolMap = new Map<string, ToolMapping>();
+  let activeToolMap = new Map<string, ToolMapping>();
   const unmappedTools: string[] = [];
+
+  let outboundTools = clientTools;
+  if (clientTools && effectivePreserveTools) {
+    const preserveProfile = resolvePreserveToolsAliasProfile({
+      clientTools,
+      preserveToolsProfile: opts.preserveToolsProfile,
+    });
+    outboundTools = preserveProfile.tools;
+    activeToolMap = preserveProfile.toolMap;
+  }
 
   if (clientTools && !effectivePreserveTools) {
     // Two passes so the unmapped-tool distributor can avoid colliding with
@@ -938,8 +1406,10 @@ export function buildCCRequest(
   }
 
   // ── Remap tool_use and tool_result references in message history ──
-  // Skip in preserveTools mode — leave conversation history untouched.
-  if (!effectivePreserveTools) {
+  // Preserve-tools usually leaves history untouched, except when an alias
+  // profile is active, in which case we still need tool_use names/input to
+  // match the outbound aliased schemas.
+  if (!effectivePreserveTools || activeToolMap.size > 0) {
     for (const msg of messages) {
       if (Array.isArray(msg.content)) {
         for (const block of msg.content as Array<Record<string, unknown>>) {
@@ -994,26 +1464,38 @@ export function buildCCRequest(
   // up-front detector above — reuse it here so we don't reparse the
   // system array a second time per request. Scrub applies at this
   // point so framework identifiers don't leak upstream.
-  let systemText = scrubFrameworkIdentifiers(rawSystemForDetection);
+  let systemText = sanitizeOpenClawProfileText(rawSystemForDetection, opts.preserveToolsProfile, {
+    preserveWorkspaceDocs: true,
+  });
+  systemText = scrubFrameworkIdentifiers(systemText);
+  systemText = compactOpenClawSystemPrompt(systemText, opts.preserveToolsProfile);
 
   // Also scrub framework identifiers from message content text blocks.
   // Clients often inject their product name into user/tool messages as well,
   // and the system-prompt-only scrub used to miss those.
   for (const msg of messages) {
     if (typeof msg.content === 'string') {
-      msg.content = scrubFrameworkIdentifiers(msg.content as string);
+      msg.content = scrubFrameworkIdentifiers(
+        sanitizeOpenClawProfileText(msg.content as string, opts.preserveToolsProfile),
+      );
     } else if (Array.isArray(msg.content)) {
       for (const block of msg.content as Array<Record<string, unknown>>) {
         if (block.type === 'text' && typeof block.text === 'string') {
-          block.text = scrubFrameworkIdentifiers(block.text);
+          block.text = scrubFrameworkIdentifiers(
+            sanitizeOpenClawProfileText(block.text, opts.preserveToolsProfile),
+          );
         }
         if (block.type === 'tool_result' && typeof block.content === 'string') {
-          block.content = scrubFrameworkIdentifiers(block.content);
+          block.content = scrubFrameworkIdentifiers(
+            sanitizeOpenClawProfileText(block.content, opts.preserveToolsProfile),
+          );
         }
         if (block.type === 'tool_result' && Array.isArray(block.content)) {
           for (const sub of block.content as Array<Record<string, unknown>>) {
             if (sub.type === 'text' && typeof sub.text === 'string') {
-              sub.text = scrubFrameworkIdentifiers(sub.text);
+              sub.text = scrubFrameworkIdentifiers(
+                sanitizeOpenClawProfileText(sub.text, opts.preserveToolsProfile),
+              );
             }
           }
         }
@@ -1047,7 +1529,7 @@ export function buildCCRequest(
   // preserveTools mode: pass client tools through unchanged (better for real
   // agents with custom schemas, but loses the CC tool fingerprint).
   if (clientTools && clientTools.length > 0) {
-    ccRequest.tools = effectivePreserveTools ? clientTools : CC_TOOL_DEFINITIONS;
+    ccRequest.tools = effectivePreserveTools ? outboundTools : CC_TOOL_DEFINITIONS;
   }
 
   // Metadata
@@ -1283,18 +1765,23 @@ export function createStreamingReverseMapper(
   if (toolMap.size === 0) return noop;
 
   const reverseMap = buildReverseLookup(toolMap);
-  // If no mapping needs translation OR context injection, fall back to
-  // identity behavior so we don't pay the SSE-parsing cost on every chunk.
-  // Hybrid mode with clientFields always needs the streaming path so the
-  // injection can run at content_block_stop.
-  let anyNeedsTranslation = false;
-  for (const { mapping } of reverseMap.values()) {
-    if (mapping.translateBack || (mapping.clientFields && mapping.clientFields.length > 0)) {
-      anyNeedsTranslation = true;
+  // If every reverse mapping is a perfect identity, fall back to the
+  // passthrough fast-path so we don't pay the SSE-parsing cost on every
+  // chunk. Name-only aliases still need the streaming mapper because the
+  // client must see its original tool name on content_block_start even when
+  // no input-field translation is required.
+  let anyNeedsStreamingRewrite = false;
+  for (const [ccName, { clientName, mapping }] of reverseMap.entries()) {
+    if (
+      clientName !== ccName
+      || mapping.translateBack
+      || (mapping.clientFields && mapping.clientFields.length > 0)
+    ) {
+      anyNeedsStreamingRewrite = true;
       break;
     }
   }
-  if (!anyNeedsTranslation) return noop;
+  if (!anyNeedsStreamingRewrite) return noop;
 
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();

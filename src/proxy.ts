@@ -1,12 +1,21 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { arch, platform } from 'node:process';
 import { getAccessToken, getStatus } from './oauth.js';
-import { buildCCRequest, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, CC_TEMPLATE, type ToolMapping, type RequestContext } from './cc-template.js';
+import {
+  buildCCRequest,
+  reverseMapResponse,
+  createStreamingReverseMapper,
+  orderHeadersForOutbound,
+  CC_TEMPLATE,
+  type PreserveToolsProfileId,
+  type ToolMapping,
+  type RequestContext,
+} from './cc-template.js';
 import { describeTemplate, detectDrift, checkCCCompat } from './live-fingerprint.js';
 import { AccountPool, computeStickyKey, parseRateLimits, type PoolAccount } from './pool.js';
 import { Analytics, billingBucketFromClaim } from './analytics.js';
@@ -20,6 +29,7 @@ const UPSTREAM_TIMEOUT_MS = 300_000; // 5 min — matches Anthropic SDK default
 const BODY_READ_TIMEOUT_MS = 30_000; // 30s — prevents slow-loris on body reads
 const MAX_CONCURRENT = 10; // Max concurrent upstream requests
 const DEFAULT_HOST = '127.0.0.1';
+const BODY_LOG_STDOUT_CAP = 8 * 1024;
 
 // A host is "loopback" if it's one of the well-known localhost literals.
 // Used to decide whether to warn at startup about binding to a reachable
@@ -346,6 +356,7 @@ interface ProxyOptions {
   model?: string;  // Override model in all requests
   passthrough?: boolean;  // Thin proxy — OAuth swap only, no injection
   preserveTools?: boolean;  // Keep client tool schemas (for agents with custom tools)
+  preserveToolsProfile?: PreserveToolsProfileId;
   hybridTools?: boolean;    // Remap to CC tools but inject request-context fields on return (#33)
   noAutoDetect?: boolean;   // Disable text-tool-client auto-detection (dario#40, ringge — keep CC fingerprint)
   strictTls?: boolean;      // Refuse to start if not running under Bun (v3.23, direction #3)
@@ -365,6 +376,11 @@ export function sanitizeError(err: unknown): string {
     .replace(/sk-ant-[a-zA-Z0-9_-]+/g, '[REDACTED]')
     .replace(/eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/g, '[REDACTED_JWT]')
     .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]');
+}
+
+export function writeFullRedactedBodyLog(targetPath: string, body: string): void {
+  mkdirSync(dirname(targetPath), { recursive: true });
+  writeFileSync(targetPath, sanitizeError(body) + '\n', 'utf8');
 }
 
 /**
@@ -447,6 +463,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   // -v stays quiet because bodies can carry file content and tool
   // output. Reported in dario#40 by @ringge.
   const verboseBodies = Boolean(opts.verboseBodies) || process.env.DARIO_LOG_BODIES === '1';
+  const verboseBodiesFullPath = process.env.DARIO_LOG_BODIES_FULL_PATH?.trim() || '';
 
   // Multi-provider backends (v3.6.0+). Loaded once at startup; the CLI
   // `dario backend add openai --key=…` writes to ~/.dario/backends/.
@@ -964,6 +981,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               bodyIdentity,
               {
                 preserveTools: opts.preserveTools ?? false,
+                preserveToolsProfile: opts.preserveToolsProfile,
                 hybridTools: opts.hybridTools ?? false,
                 noAutoDetect: opts.noAutoDetect ?? false,
               },
@@ -1004,15 +1022,26 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // body after the template build so operators see what actually
       // lands on the wire. sanitizeError's redaction strips bearer
       // tokens, sk-ant-* keys, and JWT triples in case any leaked
-      // into the body (e.g. user pasted a curl). 8KB cap because the
-      // CC system prompt alone is 25KB and dumping it every request
-      // buries the useful content. dario#40.
-      if (verboseBodies && finalBody) {
+      // into the body (e.g. user pasted a curl). Stdout stays capped
+      // at 8KB because the CC system prompt alone is 25KB and dumping
+      // it every request buries the useful content. When operators need
+      // a full capture for targeted debugging, DARIO_LOG_BODIES_FULL_PATH
+      // writes the latest fully redacted body to a file instead. dario#40.
+      if ((verboseBodies || verboseBodiesFullPath) && finalBody) {
         const rendered = finalBody.toString('utf8');
-        const capped = rendered.length > 8192
-          ? rendered.slice(0, 8192) + `\n[...truncated ${rendered.length - 8192} bytes]`
-          : rendered;
-        console.log(`[dario] #${requestCount} request body:\n${sanitizeError(capped)}`);
+        const redacted = sanitizeError(rendered);
+        if (verboseBodies) {
+          const capped = redacted.length > BODY_LOG_STDOUT_CAP
+            ? redacted.slice(0, BODY_LOG_STDOUT_CAP) + `\n[...truncated ${redacted.length - BODY_LOG_STDOUT_CAP} bytes]`
+            : redacted;
+          console.log(`[dario] #${requestCount} request body:\n${capped}`);
+        }
+        if (verboseBodiesFullPath) {
+          writeFullRedactedBodyLog(verboseBodiesFullPath, rendered);
+          if (verbose) {
+            console.log(`[dario] #${requestCount} full request body → ${verboseBodiesFullPath}`);
+          }
+        }
       }
 
       // Beta headers

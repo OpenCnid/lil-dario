@@ -3,3 +3,6 @@ dist/
 *.tgz
 .env
 credentials.json
+.codex
+.omc/
+.omx/

@@ -186,8 +186,10 @@ async function proxy() {
     console.error('[dario] Invalid --host. Must be an IP address or hostname.');
     process.exit(1);
   }
-  // --verbose=2 / -vv / DARIO_LOG_BODIES=1 → emit redacted request bodies
-  // on every POST. -v alone is unchanged (one-line per-request summary).
+  // --verbose=2 / -vv / DARIO_LOG_BODIES=1 → emit capped redacted request
+  // bodies on every POST. -v alone is unchanged (one-line per-request
+  // summary). DARIO_LOG_BODIES_FULL_PATH=/tmp/req.json writes the latest
+  // fully redacted body to a file for targeted debugging.
   // dario#40 (ringge asked for a body-dump mode when debugging client
   // compatibility without having to attach a MITM).
   const verboseBodies =
@@ -197,6 +199,19 @@ async function proxy() {
   const verbose = verboseBodies || args.includes('--verbose') || args.includes('-v');
   const passthrough = args.includes('--passthrough') || args.includes('--thin');
   const preserveTools = args.includes('--preserve-tools') || args.includes('--keep-tools');
+  const preserveToolsProfileArg = args.find(a => a.startsWith('--preserve-tools-profile='));
+  const preserveToolsProfileRaw = preserveToolsProfileArg
+    ? preserveToolsProfileArg.split('=')[1]
+    : undefined;
+  if (
+    preserveToolsProfileRaw !== undefined
+    && preserveToolsProfileRaw !== 'openclaw-subset'
+    && preserveToolsProfileRaw !== 'openclaw-wide-alias'
+  ) {
+    console.error(`[dario] Invalid --preserve-tools-profile: ${JSON.stringify(preserveToolsProfileRaw)}. Supported values: openclaw-subset, openclaw-wide-alias.`);
+    process.exit(1);
+  }
+  const preserveToolsProfile = preserveToolsProfileRaw as 'openclaw-subset' | 'openclaw-wide-alias' | undefined;
   const hybridTools = args.includes('--hybrid-tools') || args.includes('--context-inject');
   if (preserveTools && hybridTools) {
     console.error('[dario] --preserve-tools and --hybrid-tools are mutually exclusive. Pick one.');
@@ -240,7 +255,7 @@ async function proxy() {
   const sessionMaxAgeMs = parsePositiveIntFlag('--session-max-age=');
   const sessionPerClient = args.includes('--session-per-client') || undefined;
 
-  await startProxy({ port, host, verbose, verboseBodies, model, passthrough, preserveTools, hybridTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, drainOnClose, sessionIdleRotateMs, sessionRotateJitterMs, sessionMaxAgeMs, sessionPerClient });
+  await startProxy({ port, host, verbose, verboseBodies, model, passthrough, preserveTools, preserveToolsProfile, hybridTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, drainOnClose, sessionIdleRotateMs, sessionRotateJitterMs, sessionMaxAgeMs, sessionPerClient });
 }
 
 function parsePositiveIntFlag(prefix: string): number | undefined {
@@ -514,6 +529,11 @@ async function help() {
     --passthrough, --thin    Thin proxy — OAuth swap only, no injection
     --preserve-tools         Forward client tool schemas unchanged
                              Loses subscription routing; use for custom agents
+    --preserve-tools-profile=openclaw-wide-alias
+                             Validated OpenClaw preserve-tools lane.
+                             Keeps the broad tool surface intact,
+                             aliases wire-facing tool names, and is
+                             the recommended route for OpenClaw.
     --hybrid-tools           Remap to CC tools, inject sessionId/requestId/etc.
                              Keeps subscription routing for custom agents
     --no-auto-detect         Disable Cline/Kilo/Roo auto-preserve-tools
@@ -571,6 +591,9 @@ async function help() {
     --verbose, -v            Log all requests
     --verbose=2, -vv         Also dump redacted request bodies
                              (env: DARIO_LOG_BODIES=1)
+    DARIO_LOG_BODIES_FULL_PATH=/tmp/dario-request.json
+                             Write the latest fully redacted request
+                             body to a file for targeted debugging
 
   Quick start:
     dario login              # auto-detects Claude Code credentials
