@@ -133,31 +133,31 @@ async function testStreaming(model, label) {
 
 // --- OpenAI compat ---
 
-async function testOpenAINonStream() {
+async function testOpenAINonStream(model, label) {
   const resp = await fetch(`${BASE}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, messages: [{ role: 'user', content: 'Respond with exactly: "OPENAI OK"' }] })
+    body: JSON.stringify({ model, max_tokens: 1024, messages: [{ role: 'user', content: `Respond with exactly: "OPENAI ${label.toUpperCase()} OK"` }] })
   });
 
   if (resp.status !== 200) {
-    log('OpenAI non-stream', 'FAIL', `HTTP ${resp.status}: ${(await resp.text()).substring(0, 100)}`);
+    log(`${label} OpenAI non-stream`, 'FAIL', `HTTP ${resp.status}: ${(await resp.text()).substring(0, 100)}`);
     return;
   }
 
   const body = await resp.json();
-  log('OpenAI non-stream', 'PASS', `model=${body.model} | "${(body.choices?.[0]?.message?.content || '').substring(0, 40)}"`);
+  log(`${label} OpenAI non-stream`, 'PASS', `model=${body.model} | "${(body.choices?.[0]?.message?.content || '').substring(0, 40)}"`);
 }
 
-async function testOpenAIStream() {
+async function testOpenAIStream(model, label) {
   const resp = await fetch(`${BASE}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, stream: true, messages: [{ role: 'user', content: 'Respond with exactly: "OPENAI STREAM OK"' }] })
+    body: JSON.stringify({ model, max_tokens: 1024, stream: true, messages: [{ role: 'user', content: `Respond with exactly: "OPENAI ${label.toUpperCase()} STREAM OK"` }] })
   });
 
   if (resp.status !== 200) {
-    log('OpenAI stream', 'FAIL', `HTTP ${resp.status}: ${(await resp.text()).substring(0, 100)}`);
+    log(`${label} OpenAI stream`, 'FAIL', `HTTP ${resp.status}: ${(await resp.text()).substring(0, 100)}`);
     return;
   }
 
@@ -170,9 +170,9 @@ async function testOpenAIStream() {
   }
 
   if (dataLines.length > 0 && rawText.includes('[DONE]')) {
-    log('OpenAI stream', 'PASS', `${dataLines.length} chunks | "${text.substring(0, 40)}"`);
+    log(`${label} OpenAI stream`, 'PASS', `${dataLines.length} chunks | "${text.substring(0, 40)}"`);
   } else {
-    log('OpenAI stream', 'FAIL', `chunks=${dataLines.length} [DONE]=${rawText.includes('[DONE]')}`);
+    log(`${label} OpenAI stream`, 'FAIL', `chunks=${dataLines.length} [DONE]=${rawText.includes('[DONE]')}`);
   }
 }
 
@@ -259,8 +259,10 @@ async function main() {
   console.log();
 
   console.log('--- OpenAI Compat ---');
-  await testOpenAINonStream(); await wait(1500);
-  await testOpenAIStream(); await wait(1500);
+  for (const [model, label] of [['claude-sonnet-4-6', 'Sonnet'], ['claude-opus-4-6', 'Opus']]) {
+    await testOpenAINonStream(model, label); await wait(1500);
+    await testOpenAIStream(model, label); await wait(1500);
+  }
   console.log();
 
   console.log('--- Tool Use ---');

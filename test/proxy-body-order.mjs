@@ -31,7 +31,7 @@ function header(label) {
 // the passthrough path.
 header('orderBodyForOutbound — empty order returns input unchanged');
 {
-  const b = { model: 'claude-opus-4-5', messages: [], system: [] };
+  const b = { model: 'claude-opus-4-6', messages: [], system: [] };
   const out = orderBodyForOutbound(b, []);
   check('empty order → same record (reference-equal)', out === b);
 }
@@ -44,7 +44,7 @@ header('orderBodyForOutbound — captured order is preserved');
   const b = {
     stream: true,
     max_tokens: 32000,
-    model: 'claude-opus-4-5',
+    model: 'claude-opus-4-6',
     metadata: { user_id: 'x' },
     system: [{ type: 'text', text: 'hi' }],
     messages: [{ role: 'user', content: 'yo' }],
@@ -64,7 +64,7 @@ header('orderBodyForOutbound — captured order is preserved');
     JSON.stringify(out).indexOf('"model"') < JSON.stringify(out).indexOf('"messages"') &&
       JSON.stringify(out).indexOf('"messages"') < JSON.stringify(out).indexOf('"stream"'),
   );
-  check('model value round-trips', out.model === 'claude-opus-4-5');
+  check('model value round-trips', out.model === 'claude-opus-4-6');
   check('max_tokens value round-trips', out.max_tokens === 32000);
   check('nested objects are referenced, not cloned', out.metadata === b.metadata);
 }
@@ -94,7 +94,7 @@ header('orderBodyForOutbound — case-sensitive key matching');
 header('orderBodyForOutbound — extras go at the tail, in insertion order');
 {
   const b = {
-    model: 'claude-opus-4-5',
+    model: 'claude-opus-4-6',
     messages: [],
     future_field_a: 'alpha',
     system: [],
@@ -121,7 +121,7 @@ header('orderBodyForOutbound — extras go at the tail, in insertion order');
 // ======================================================================
 header('orderBodyForOutbound — absent keys are skipped, not emitted as undefined');
 {
-  const b = { model: 'claude-opus-4-5', messages: [] };
+  const b = { model: 'claude-opus-4-6', messages: [] };
   const order = ['model', 'messages', 'tools', 'thinking'];
 
   const out = orderBodyForOutbound(b, order);
@@ -142,7 +142,7 @@ header('orderBodyForOutbound — absent keys are skipped, not emitted as undefin
 // ======================================================================
 header('orderBodyForOutbound — duplicate captured names are deduped');
 {
-  const b = { model: 'claude-opus-4-5', messages: [] };
+  const b = { model: 'claude-opus-4-6', messages: [] };
   const order = ['model', 'messages', 'model'];
 
   const out = orderBodyForOutbound(b, order);
@@ -189,7 +189,7 @@ header('orderBodyForOutbound — idempotent over the same captured order');
 {
   const b = {
     stream: true,
-    model: 'claude-opus-4-5',
+    model: 'claude-opus-4-6',
     messages: [],
     system: [],
   };

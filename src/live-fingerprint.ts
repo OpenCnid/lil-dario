@@ -399,7 +399,7 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
               id: 'msg_live_capture',
               type: 'message',
               role: 'assistant',
-              model: 'claude-opus-4-5',
+              model: 'claude-opus-4-6',
               content: [],
               stop_reason: null,
               stop_sequence: null,
