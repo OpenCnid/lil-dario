@@ -1,13 +1,17 @@
-# `openclaw-billing-proxy` learnings for the full `dario` OpenClaw profile
+# `openclaw-billing-proxy` learnings for the `dario` OpenClaw wire-alias profile
 
 Repo studied:
 - `https://github.com/zacdcook/openclaw-billing-proxy`
-- local clone: `/home/molt/clawd/.tmp/openclaw-billing-proxy-study`
 
-Key files:
-- `/home/molt/clawd/.tmp/openclaw-billing-proxy-study/README.md`
-- `/home/molt/clawd/.tmp/openclaw-billing-proxy-study/proxy.js`
-- `/home/molt/clawd/.tmp/openclaw-billing-proxy-study/CHANGELOG.md`
+Key upstream files reviewed:
+- `README.md`
+- `proxy.js`
+- `CHANGELOG.md`
+
+Notes:
+- the original study used a temporary local clone during investigation
+- that scratch clone is not the canonical reference
+- this doc keeps the durable conclusions and points back to the upstream repo
 
 ## Biggest takeaway
 

@@ -16,7 +16,8 @@ The intended difference was only the wire-facing tool names.
 
 ### Raw-wide artifact
 
-File: `/tmp/lil-dario-stress/AB-raw.request.json`
+Artifact:
+- captured raw-wide request body from the local A/B run (temp capture, not committed)
 
 Observed:
 - bytes: `168053`
@@ -32,7 +33,8 @@ Result:
 
 ### Alias-wide artifact, after reverse-map fix
 
-File: `/tmp/lil-dario-stress/AB-alias-fixed.request.json`
+Artifact:
+- captured alias-wide request body from the local A/B run after the reverse-map fix (temp capture, not committed)
 
 Observed:
 - bytes: `177815`
@@ -141,7 +143,7 @@ Prompt shape:
 
 Live result:
 - OpenClaw thread reply: ``lil-dario/claude-sonnet-4-6``
-- request artifact: `/tmp/lil-dario-wide-alias-live-reval.request.json`
+- request artifact: final live revalidation capture (local temp artifact, not committed)
 - bytes: `179897`
 - tool count: `24`
 - wire-facing tool names stayed aliased (`StatusCheck`, `TaskSend`, `SendMessage`, ...)

@@ -157,7 +157,7 @@ Latest successful live revalidation used this shape:
 
 Observed result:
 - live reply: ``lil-dario/claude-sonnet-4-6``
-- artifact: `/tmp/lil-dario-wide-alias-live-reval.request.json`
+- captured request artifact from the final live revalidation (local temp capture, not committed)
 - 24 aliased tools on wire
 - checked raw snake_case identifiers absent from the captured request body
 - ordinary prose preserved while explicit code-ish generic tool mention was aliased
